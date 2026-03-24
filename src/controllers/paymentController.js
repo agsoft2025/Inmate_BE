@@ -6,10 +6,10 @@ const InmateLocation = require("../model/inmateLocationModel");
 const axios = require("axios")
 const crypto = require("crypto");
 const userModel = require("../model/userModel");
+const { log } = require("console");
 
 exports.inmateCreatePayment = async (req, res) => {
   try {
-    console.log("<><>req.body",req.body)
     const { inmateId, amount } = req.body;
 
     const inmate = await inmateModel.findOne({ inmateId:inmateId });
@@ -201,11 +201,12 @@ exports.createOrder = async (req, res) => {
     const payload = {
       amount,
       shortReceipt, inmateData,
-      locationId: locationData[0].global_location_id,
+      locationId: locationData[0].globalLocationId,
       subscription_type: "MONTHLY",
       inmate_info:inmateData,
       month:Number(month)
     }
+    log("payload",payload)
      orderData = await axios.post(`${process.env.GLOBAL_URL}/api/payment/create`, payload)
      orderData = orderData.data     
     if(orderData?.subscription){
