@@ -6,6 +6,7 @@ const logAudit = require('../utils/auditlogger');
 const tokenBlacklist = require("../utils/blackList");
 const userModel = require("../model/userModel");
 const inmateModel = require("../model/inmateModel");
+const { sendWhatsAppOTP } = require("../service/sms.service");
 
 exports.login = async (req, res) => {
     try {
@@ -145,7 +146,6 @@ exports.logout = async (req, res) => {
 exports.loginMobile = async (req, res) => {
     try {
         const { username, password } = req.body
-        console.log("<><> req.body", req.body)
         
         if (!username) return res.status(400).send({ status: false, message: "user name required" })
         if (!password) return res.status(400).send({ status: false, message: "password required" })
@@ -157,10 +157,8 @@ exports.loginMobile = async (req, res) => {
         if (!passwordMatch) return res.status(401).send({ status: false, message: "invalid password" })
 
         if (user.role === "INMATE") {
-            console.log("<><>workign inside");
             
             if (user.subscription && user.subscriptionEnd <= Date.now()) {
-                console.log("<><>make false sub")
                 // subscription expired → turn it off
                 user.subscription = false;
                 await user.save();
@@ -201,7 +199,9 @@ exports.loginMobile = async (req, res) => {
             user.otpAttemptedAt = null;
             user.otpLockedUntil = null;
             await user.save();
+            const inmateData = await inmateModel.findOne({ user_id: user._id })
             // const smsResponse = await sendSMS(otp, studentData.contact_number)
+            await sendWhatsAppOTP(inmateData.phonenumber, otp, inmateData.firstName)
 
             // if (!smsResponse.status) {
             //     return res.status(400).send({ status: false, message: smsResponse.message })
