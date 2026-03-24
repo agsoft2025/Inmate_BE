@@ -99,6 +99,8 @@ const downloadInmatesCSV = async (req, res) => {
 
 const createInmate = async (req, res) => {
   try {
+    console.log("<><>req.body",req.body);
+    
     const { inmateId, firstName, lastName, cellNumber, dateOfBirth, admissionDate, status, crimeType, custodyType, locationId, descriptor ,phonenumber} = req.body;     
     if (!locationId) {
       return res.status(400).json({ message: "location is required" });
