@@ -139,7 +139,10 @@ exports.updateLocation = async (req, res) => {
 
 exports.getAllLocation = async (req, res) => {
   try {
-    const response = await InmateLocation.find().populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
+    console.log("Fetching all locations",req.user.id);
+    const userData = await userModel.findById(req.user.id);
+    console.log("User data:", userData.location_id);
+    const response = await InmateLocation.find({_id: userData.location_id}).populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
     if (!response.length) {
       res.status(404).send({ success: false, data: response, message: "could not find location" })
     }

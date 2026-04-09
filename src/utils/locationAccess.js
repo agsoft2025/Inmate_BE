@@ -54,7 +54,7 @@ const buildLocationFilter = (user) => {
     return {};
   }
 
-  return { location_id: mongoose.Types.ObjectId(user.location_id) };
+  return { location_id: new mongoose.Types.ObjectId(user.location_id) };
 };
 
 module.exports = {

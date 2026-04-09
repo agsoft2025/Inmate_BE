@@ -640,7 +640,16 @@ const fetchInmateDataUsingFace = async (req, res) => {
     if (!bestMatch || minDistance > MATCH_THRESHOLD) {
       return res.status(400).json({ message: "Face not recognized" });
     }
-    const userData = await Inmate.findOne({ user_id: bestMatch._id })
+    const locationFilter = buildLocationFilter(req.user);
+    const userData = await Inmate.findOne({
+      ...locationFilter,
+      user_id: bestMatch._id
+    });
+
+    if (!userData) {
+      return res.status(404).send({ success: false, message: "data fetch successfully" })
+    }
+
     return res.status(200).send({ success: true, data: userData, message: "data fetch successfully" })
   } catch (error) {
     return res.status(500).send({ success: false, message: "internal server down", error: error.message })
