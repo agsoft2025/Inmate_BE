@@ -9,11 +9,23 @@ const formatDateToYYYYMMDD = require("../utils/dateFormat");
 const financialModel = require("../model/financialModel");
 const userModel = require("../model/userModel");
 const InmateLocation = require("../model/inmateLocationModel");
+const { resolveLocationId, buildLocationFilter, LocationAccessError } = require("../utils/locationAccess");
+const { normalizeIndianMobile, isValidIndianMobile } = require("../utils/phoneUtils");
 const POSShoppingCart = require('../model/posShoppingCart');
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
+const normalizePhoneNumber = (value) => {
+  if (!value) return value;
+  return String(value)
+    .replace(/[^0-9]/g, "")
+    .replace(/^91/, "")
+    .replace(/^0+/, "")
+    .trim();
+};
+
 const downloadInmatesCSV1 = async (req, res) => {
   try {
-    const inmates = await Inmate.find().lean();
+    const locationFilter = buildLocationFilter(req.user);
+    const inmates = await Inmate.find(locationFilter).lean();
 
     if (!inmates || inmates.length === 0) {
       return res.status(404).json({ message: 'No inmates found to export' });
@@ -54,7 +66,8 @@ const downloadInmatesCSV1 = async (req, res) => {
 
 const downloadInmatesCSV = async (req, res) => {
   try {
-    const inmates = await Inmate.find().lean();
+    const locationFilter = buildLocationFilter(req.user);
+    const inmates = await Inmate.find(locationFilter).lean();
 
     if (!inmates || inmates.length === 0) {
       return res.status(404).json({ message: 'No inmates found to export' });
@@ -102,7 +115,17 @@ const createInmate = async (req, res) => {
     console.log("<><>req.body",req.body);
     
     const { inmateId, firstName, lastName, cellNumber, dateOfBirth, admissionDate, status, crimeType, custodyType, locationId, descriptor ,phonenumber} = req.body;     
-    if (!locationId) {
+    let assignedLocationId;
+    try {
+      assignedLocationId = await resolveLocationId(req.user, locationId);
+    } catch (error) {
+      if (error instanceof LocationAccessError) {
+        return res.status(error.status).json({ success: false, message: error.message });
+      }
+      throw error;
+    }
+
+    if (!assignedLocationId) {
       return res.status(400).json({ message: "location is required" });
     }
     if (descriptor) {
@@ -111,9 +134,16 @@ const createInmate = async (req, res) => {
         return res.status(400).send({ success: false, message: `A face record already exists for user ${checkFaceMatch.username}` })
       }
     }
+
     if (!inmateId || !firstName || !lastName || status === undefined || !phonenumber) {
       return res.status(400).json({ message: "Missing required fields" });
     }
+
+    if (!isValidIndianMobile(phonenumber)) {
+      return res.status(400).json({ message: "Invalid phone number" });
+    }
+
+    const normalizedPhone = normalizeIndianMobile(phonenumber);
     const existingInmateID = await InmateSchema.findOne({ inmateId });
 
     if (existingInmateID) {
@@ -131,14 +161,14 @@ const createInmate = async (req, res) => {
       admissionDate,
       status,
       crimeType,
-      phonenumber,
-      location_id: locationId
+      phonenumber: normalizedPhone,
+      location_id: assignedLocationId
     });
 
     const savedInmate = await inmate.save()
     if (savedInmate) {
       const hashedPassword = await bcrypt.hash(inmateId, 10);
-      const newUser = new userModel({ username: inmateId, fullname: inmateId, inmateId, password: hashedPassword, role: "INMATE", location_id: locationId, descriptor });
+      const newUser = new userModel({ username: inmateId, fullname: inmateId, inmateId, password: hashedPassword, role: "INMATE", location_id: assignedLocationId, descriptor });
       const savedUser = await newUser.save();
       const updatedInmate = await InmateSchema.findByIdAndUpdate(
         savedInmate._id,
@@ -158,6 +188,9 @@ const createInmate = async (req, res) => {
     });
     res.status(201).json({ success: true, data: savedInmate, message: "Inmate successfully created" });
   } catch (error) {
+    if (error instanceof LocationAccessError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
     console.log("<><>error",error);
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
@@ -168,7 +201,8 @@ const getInmates = async (req, res) => {
     const { page = 1, limit = 10, sortField = 'createdAt', sortOrder, totalRecords } = req.query;
     const order = sortOrder === 'asc' ? 1 : -1;
 
-    let inmatesQuery = Inmate.find()
+    const locationFilter = buildLocationFilter(req.user);
+    let inmatesQuery = Inmate.find(locationFilter)
       .populate('location_id', 'locationName')
       .populate('user_id', 'descriptor')
       .sort({ [sortField]: order });
@@ -184,7 +218,7 @@ const getInmates = async (req, res) => {
 
     const [inmates, totalItems] = await Promise.all([
       inmatesQuery,
-      Inmate.countDocuments()
+      Inmate.countDocuments(locationFilter)
     ]);
 
     if (!inmates.length) {
@@ -221,12 +255,13 @@ const getInmatesID = async (req, res) => {
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
     }
+    const locationFilter = buildLocationFilter(req.user);
     let findInmate;
 
     if (mongoose.Types.ObjectId.isValid(id)) {
-      findInmate = await InmateSchema.findById(id);
+      findInmate = await InmateSchema.findOne({ ...locationFilter, _id: id });
     } else {
-      findInmate = await InmateSchema.findOne({ inmateId: id });
+      findInmate = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
     }
     if (!findInmate) {
       return res.status(404).json({ message: "No data found" });
@@ -241,29 +276,51 @@ const updateInmate = async (req, res) => {
   try {
     const { id } = req.params;
     const updateBody = req.body;
-    const { inmateId, descriptor } = req.body
-
-    const existingInmateID = await InmateSchema.findOne({ inmateId, _id: { $ne: req.params.id } });
-    if (existingInmateID) {
-      return res.status(400).json({ success: false, message: "Inmate ID already exist" })
-    }
-
-    if (descriptor) {
-      const userData = await InmateSchema.findById(id).populate("user_id");
-      const checkFaceMatch = await faceRecognitionExcludeUserService(descriptor, userData.user_id._id);
-      if (checkFaceMatch.status) {
-        return res.status(400).send({ success: false, message: `A face record already exists for user ${checkFaceMatch.username}` })
-      }
-    }
+    const { inmateId, descriptor } = req.body;
 
     if (!id) {
-      return res.status(400).json({ message: "ID is missing" })
+      return res.status(400).json({ message: "ID is missing" });
     }
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
-    const updatedInmate = await InmateSchema.findByIdAndUpdate(
-      id,
+
+    const locationFilter = buildLocationFilter(req.user);
+
+    if (inmateId) {
+      const duplicateFilter = {
+        ...locationFilter,
+        inmateId,
+        _id: { $ne: id }
+      };
+      const existingInmateID = await InmateSchema.findOne(duplicateFilter);
+      if (existingInmateID) {
+        return res.status(400).json({ success: false, message: "Inmate ID already exist" });
+      }
+    }
+
+    const inmateToUpdate = await InmateSchema.findOne({ ...locationFilter, _id: id }).populate("user_id");
+    if (!inmateToUpdate) {
+      return res.status(404).json({ message: "No data found" });
+    }
+
+    if (descriptor) {
+      const userIdForFace = inmateToUpdate.user_id?._id;
+      const checkFaceMatch = await faceRecognitionExcludeUserService(descriptor, userIdForFace);
+      if (checkFaceMatch.status) {
+        return res.status(400).send({ success: false, message: `A face record already exists for user ${checkFaceMatch.username}` });
+      }
+    }
+
+    if (updateBody.phonenumber) {
+      if (!isValidIndianMobile(updateBody.phonenumber)) {
+        return res.status(400).json({ message: "Invalid phone number" });
+      }
+      updateBody.phonenumber = normalizeIndianMobile(updateBody.phonenumber);
+    }
+
+    const updatedInmate = await InmateSchema.findOneAndUpdate(
+      { ...locationFilter, _id: id },
       updateBody,
       { new: true, runValidators: true }
     );
@@ -271,22 +328,22 @@ const updateInmate = async (req, res) => {
       return res.status(404).json({ message: "No data found" });
     }
 
-    if (updateInmate && descriptor) {
-      const hashedPassword = await bcrypt.hash(inmateId, 10);
-      updatedUser = await userModel.findByIdAndUpdate(
-        updatedInmate.user_id,
-        { username: inmateId, fullname: inmateId, password: hashedPassword, descriptor },
-        { new: true }
-      );
-    } else {
-      const hashedPassword = await bcrypt.hash(inmateId, 10);
-      updatedUser = await userModel.findByIdAndUpdate(
-        updatedInmate.user_id,
-        { username: inmateId, fullname: inmateId, password: hashedPassword },
-        { new: true }
-      );
-
+    const hashedPassword = await bcrypt.hash(inmateId, 10);
+    const userPayload = {
+      username: inmateId,
+      fullname: inmateId,
+      password: hashedPassword,
+    };
+    if (descriptor) {
+      userPayload.descriptor = descriptor;
     }
+
+    await userModel.findByIdAndUpdate(
+      updatedInmate.user_id,
+      userPayload,
+      { new: true }
+    );
+
     await logAudit({
       userId: req.user.id,
       username: req.user.username,
@@ -296,13 +353,16 @@ const updateInmate = async (req, res) => {
       description: `Updated inmate ${updatedInmate.inmateId}`,
       changes: req.body
     });
-    res.status(200).json({ success: true, data: updatedInmate, message: "Inmate update successfully" })
+    res.status(200).json({ success: true, data: updatedInmate, message: "Inmate update successfully" });
   } catch (error) {
-    console.log("<><>error",error);
-    
+    if (error instanceof LocationAccessError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    console.log("<><>error", error);
+
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
-}
+};
 
 const deleteInmate = async (req, res) => {
   try {
@@ -313,20 +373,21 @@ const deleteInmate = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
-    const updatedInmate = await InmateSchema.findByIdAndDelete(id);
-    if (!updatedInmate) {
+    const locationFilter = buildLocationFilter(req.user);
+    const deletedInmate = await InmateSchema.findOneAndDelete({ ...locationFilter, _id: id });
+    if (!deletedInmate) {
       return res.status(404).json({ message: "No data found" });
     }
-    const inmateDelete = await userModel.deleteOne({ inmateId: updatedInmate.inmateId })
+    const inmateDelete = await userModel.deleteOne({ inmateId: deletedInmate.inmateId })
 
     await logAudit({
       userId: req.user.id,
       username: req.user.username,
       action: 'DELETE',
       targetModel: 'Inmate',
-      targetId: updatedInmate._id,
-      description: `Deleted inmate ${updatedInmate.inmateId}`,
-      changes: updatedInmate.toObject()
+      targetId: deletedInmate._id,
+      description: `Deleted inmate ${deletedInmate.inmateId}`,
+      changes: deletedInmate.toObject()
     });
     res.status(200).json({ success: true, message: "Inmate successfully deleted" })
   } catch (error) {
@@ -344,7 +405,9 @@ const searchInmates = async (req, res) => {
 
     const regex = new RegExp(query, "i");
 
+    const baseFilter = buildLocationFilter(req.user);
     const filter = {
+      ...baseFilter,
       $or: [
         { inmateId: regex },
         { firstName: regex },
@@ -355,7 +418,7 @@ const searchInmates = async (req, res) => {
 
     const results = await InmateSchema.find(filter);
     const totalMatching = await InmateSchema.countDocuments(filter); 
-    const totalInmates = await InmateSchema.estimatedDocumentCount();
+    const totalInmates = await InmateSchema.countDocuments(baseFilter);
 
     res.status(200).json({
       success: true,
@@ -376,7 +439,8 @@ const getInmateUsingInmateID = async (req, res) => {
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
     }
-    const findInmate = await InmateSchema.find({ inmateId: id });
+    const locationFilter = buildLocationFilter(req.user);
+    const findInmate = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
     if (!findInmate) {
       return res.status(404).json({ message: "No data found" });
     }
@@ -393,6 +457,12 @@ const getInmateTransactionData = async (req, res) => {
 
     if (!id) {
       return res.status(400).json({ message: "ID is missing" });
+    }
+
+    const locationFilter = buildLocationFilter(req.user);
+    const inmateData = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
+    if (!inmateData) {
+      return res.status(404).send({ success: false, message: "No data found" });
     }
 
     let filter = { inmateId: id };

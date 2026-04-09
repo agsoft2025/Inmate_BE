@@ -134,6 +134,19 @@ exports.logout = async (req, res) => {
             description: `User ${user.username} logged out`
         });
 
+        // clear cookie counterparts so client resets location selection
+        res.clearCookie("selectedLocation", { path: "/" });
+        res.clearCookie(`selectedLocation_${user.id}`, { path: "/" });
+
+        res.cookie("selectedLocation", "", {
+          maxAge: 0,
+          path: "/",
+        });
+        res.cookie(`selectedLocation_${user.id}`, "", {
+          maxAge: 0,
+          path: "/",
+        });
+
         res.status(200).json({ message: "Logout successful" });
 
     } catch (error) {

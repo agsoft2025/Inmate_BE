@@ -1,6 +1,6 @@
 const { default: mongoose } = require("mongoose");
 const InmateLocation = require("../model/inmateLocationModel");
-const UserSchema = require("../model/userModel")
+const userModel = require("../model/userModel");
 const axios = require("axios");
 const { syncLocationToGlobal } = require("../service/globaleServer");
 
@@ -8,46 +8,51 @@ exports.addLocation = async (req, res) => {
   try {
     const { name, locationName, custodyLimits, baseUrl } = req.body;
 
-    if (!name || !locationName)
-      return res.status(400).json({ success: false, message: "name and locationName required" });
-
-    const exists = await InmateLocation.findOne();
-    if (exists) {
-      return res.status(409).json({
+    if (!name || !locationName) {
+      return res.status(400).json({
         success: false,
-        message: "Location already configured"
+        message: "name and locationName required"
+      });
+    }
+
+    // 🔒 Ensure admin doesn't already have a location
+    const existingUser = await userModel.findById(req.user.id);
+
+    if (existingUser.location_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Admin already has a location"
       });
     }
 
     const location = await InmateLocation.create({
-      singleton: true,
       name,
       locationName,
       baseUrl,
       custodyLimits,
       createdBy: req.user.id,
-      updatedBy: req.user.id,
-      globalSyncStatus: "pending"
+      updatedBy: req.user.id
     });
 
-    // 🔥 fire-and-forget background sync
+    // assign location to admin
+    await userModel.findByIdAndUpdate(req.user.id, {
+      location_id: location._id
+    });
+
     syncLocationToGlobal(location._id);
 
     return res.status(201).json({
       success: true,
-      message: "Location created (global sync in progress)",
+      message: "Location created successfully",
       data: location
     });
 
   } catch (err) {
-    console.log("<><>err",err)
-    if (err.code === 11000) {
-      return res.status(409).json({
-        success: false,
-        message: "Location already exists"
-      });
-    }
-    return res.status(500).json({ success: false, message: err.message });
+    console.log(err);
+    return res.status(500).json({
+      success: false,
+      message: err.message
+    });
   }
 };
 
@@ -59,12 +64,25 @@ exports.updateLocation = async (req, res) => {
   try {
     const { locationName, custodyLimits, name, baseUrl } = req.body;
 
-    // Only ONE location exists
-    const location = await InmateLocation.findOne();
-    if (!location) {
+    const adminUser = await userModel.findById(req.user.id);
+
+    if (!adminUser || !adminUser.location_id) {
       return res.status(404).json({
         success: false,
-        message: "Location not configured"
+        message: "Admin or location not found"
+      });
+    }
+
+    // 🔒 STRICT CHECK
+    const location = await InmateLocation.findOne({
+      _id: adminUser.location_id,
+      createdBy: req.user.id
+    });
+
+    if (!location) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized access"
       });
     }
 
@@ -75,13 +93,6 @@ exports.updateLocation = async (req, res) => {
     if (baseUrl) updateData.baseUrl = baseUrl;
 
     if (custodyLimits) {
-      if (!Array.isArray(custodyLimits) || custodyLimits.length === 0) {
-        return res.status(400).json({
-          success: false,
-          message: "custodyLimits must be a non-empty array"
-        });
-      }
-
       const allowed = new Set([
         "remand_prison",
         "under_trail",
@@ -100,34 +111,31 @@ exports.updateLocation = async (req, res) => {
       updateData.custodyLimits = custodyLimits;
     }
 
-    // 🔑 mark for re-sync
     updateData.globalSyncStatus = "pending";
     updateData.globalSyncError = null;
 
     const updated = await InmateLocation.findByIdAndUpdate(
       location._id,
       updateData,
-      { new: true, runValidators: true }
+      { new: true }
     );
 
-    // 🔥 async background sync
     syncLocationToGlobal(updated._id);
 
     return res.status(200).json({
       success: true,
-      message: "Location updated (global sync in progress)",
+      message: "Location updated",
       data: updated
     });
 
   } catch (error) {
-    console.error("LOCAL UPDATE ERROR:", error);
+    console.error(error);
     return res.status(500).json({
       success: false,
       message: error.message
     });
   }
 };
-
 
 exports.getAllLocation = async (req, res) => {
   try {

@@ -55,7 +55,7 @@ app.use("/inmate", authenticateToken, inmateRoutes);
 app.use("/financial", authenticateToken, financialRoutes);
 app.use("/tuck-shop", authenticateToken, tuckShopRoutes);
 app.use("/pos-shop-cart", authenticateToken, cartRoutes);
-app.use("/users", authenticateToken, userRoutes);
+app.use("/users", userRoutes);
 app.use("/faceRecognition",userRoutes)
 app.use("/transactions", authenticateToken, transactionRoutes);
 app.use("/dashboard", authenticateToken, dashboardRoutes);

@@ -30,7 +30,7 @@ const inmateSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
-      match: /^[6-9]\d{9}$/, // Indian mobile validation
+      match: /^(?:\+91|0)?[6-9]\d{9}$/, // allow optional +91 or 0 prefix
       index: true
     },
 

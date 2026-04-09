@@ -13,12 +13,6 @@ const custodyLimitSchema = new mongoose.Schema({
 
 const inmateLocationSchema = new mongoose.Schema(
     {
-        singleton: {
-            type: Boolean,
-            default: true,
-            unique: true,
-            immutable: true
-        },
         locationName: {
             type: String,
             required: true,

@@ -10,14 +10,22 @@ const InmateSchema = require("../model/inmateModel");
 const userModel = require('../model/userModel');
 const bcrypt = require('bcrypt');
 const InmateLocation = require('../model/inmateLocationModel');
+const { resolveLocationId, LocationAccessError } = require('../utils/locationAccess');
+const { normalizeIndianMobile, isValidIndianMobile } = require('../utils/phoneUtils');
 // const { parse } =require('date-fns');
 
 const bulkUpsertInmates = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
+  let locationId;
 
   try {
-    const locationId = req.body.location_id;
+    locationId = await resolveLocationId(req.user, req.body.location_id);
+    if (!locationId) {
+      await session.abortTransaction();
+      return res.status(400).json({ success: false, message: "Location is required" });
+    }
+    const locationIdString = locationId.toString();
 
     if (!req.file) {
       return res.status(400).json({
@@ -62,7 +70,9 @@ const bulkUpsertInmates = async (req, res) => {
 
     /* ---------- Pre-fetch existing inmateIds & phones ---------- */
     const inmateIds = rows.map(r => r.inmateId).filter(Boolean);
-    const phones = rows.map(r => r.phonenumber).filter(Boolean);
+    const phones = rows
+      .map(r => normalizeIndianMobile(r.phonenumber))
+      .filter(Boolean);
 
     const existingInmates = await Inmate.find(
       {
@@ -107,6 +117,7 @@ const bulkUpsertInmates = async (req, res) => {
         admissionDate,
         location_id
       } = row;
+      const normalizedPhone = normalizeIndianMobile(phonenumber);
 
       /* ---- Mandatory fields ---- */
       const requiredFields = {
@@ -132,7 +143,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Phone format ---- */
-      if (!/^[6-9]\d{9}$/.test(phonenumber)) {
+      if (!isValidIndianMobile(phonenumber)) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -143,7 +154,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Location validation ---- */
-      if (location_id && location_id !== locationId) {
+      if (location_id && location_id !== locationIdString) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -172,7 +183,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Existing phone number ---- */
-      if (existingPhoneSet.has(phonenumber)) {
+      if (existingPhoneSet.has(normalizedPhone)) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -189,7 +200,7 @@ const bulkUpsertInmates = async (req, res) => {
             inmateId,
             firstName,
             lastName,
-            phonenumber,
+            phonenumber: normalizedPhone,
             status,
             balance: Number(balance),
             cellNumber,
@@ -207,7 +218,7 @@ const bulkUpsertInmates = async (req, res) => {
 
       // prevent duplicates within same file
       existingInmateIdSet.add(inmateId);
-      existingPhoneSet.add(phonenumber);
+      existingPhoneSet.add(normalizedPhone);
     });
 
     /* ---------- Insert inmates ---------- */
@@ -261,6 +272,9 @@ const bulkUpsertInmates = async (req, res) => {
 
   } catch (error) {
     await session.abortTransaction();
+    if (error instanceof LocationAccessError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
     return res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -272,129 +286,139 @@ const bulkUpsertInmates = async (req, res) => {
 };
 
 const bulkUpsertFinancial = async (req, res) => {
+  let locationId;
   try {
-    await InmateLocation.findByIdAndUpdate(req.body.location, { $set: { purchaseStatus: "denied" } }).then(async (_d) => {
-      if (!req.file) {
-        return res.status(400).json({ message: 'No file uploaded' });
+    locationId = await resolveLocationId(req.user, req.body.location);
+    if (!locationId) {
+      return res.status(400).json({ message: 'Location is required' });
+    }
+
+    await InmateLocation.findByIdAndUpdate(
+      locationId,
+      { $set: { purchaseStatus: "denied" } }
+    );
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop().toLowerCase();
+    let records;
+
+    if (ext === 'csv') {
+      const csvString = req.file.buffer.toString('utf-8');
+      records = parse(csvString, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        delimiter: ','
+      });
+    } else if (ext === 'xlsx') {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    } else {
+      return res.status(400).json({ message: 'Unsupported file format' });
+    }
+
+    const results = {
+      created: [],
+      skipped: [],
+      failed: []
+    };
+
+    for (const entry of records) {
+      let {
+        inmateId,
+        custodyType,
+        wageAmount,
+        hoursWorked,
+        transaction = "WEEKLY",
+        workAssignId,
+        type = "wages"
+      } = entry;
+
+      if (!inmateId || !custodyType || !type || !wageAmount || !hoursWorked || !transaction || !workAssignId) {
+        results.failed.push({ inmateId, reason: 'Missing required fields' });
+        continue;
       }
 
-      const ext = req.file.originalname.split('.').pop().toLowerCase();
-      let records;
+      const Departments = await Department.find({
+        "name": workAssignId
+      });
 
-      if (ext === 'csv') {
-        const csvString = req.file.buffer.toString('utf-8');
-        records = parse(csvString, {
-          columns: true,
-          skip_empty_lines: true,
-          trim: true,
-          delimiter: ','
-        });
-      } else if (ext === 'xlsx') {
-        const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-        const sheetName = workbook.SheetNames[0];
-        records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-      } else {
-        return res.status(400).json({ message: 'Unsupported file format' });
+      if (!Departments.length) {
+        results.failed.push({ inmateId, reason: 'Missing department', workAssignId });
+        continue;
       }
 
-      const results = {
-        created: [],
-        skipped: [],
-        failed: []
-      };
+      const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type)
+      if (!checkLimit.status) {
+        results.failed.push({ inmateId, reason: checkLimit.message, workAssignId });
+        continue;
+      }
 
-      for (const entry of records) {
-        let {
-          inmateId,
-          custodyType,
-          wageAmount,
-          hoursWorked,
-          transaction = "WEEKLY",
-          workAssignId,
-          type = "wages"
-        } = entry;
+      workAssignId = new mongoose.Types.ObjectId(Departments[0]._id);
 
-        if (!inmateId || !custodyType || !type || !wageAmount || !hoursWorked || !transaction || !workAssignId) {
-          results.failed.push({ inmateId, reason: 'Missing required fields' });
+      try {
+        const wage = parseInt(wageAmount || 0);
+        if (!wage || isNaN(wage)) {
+          results.skipped.push(inmateId);
           continue;
-        }
+        } else {
+          const newEntry = new Financial({
+            inmateId,
+            transaction,
+            workAssignId,
+            hoursWorked: parseInt(hoursWorked || 0),
+            wageAmount: wage,
+            type,
+            status: "ACTIVE",
+            custodyType
+          });
 
-        const Departments = await Department.find({
-          "name": workAssignId
-        });
-
-        if (!Departments.length) {
-          results.failed.push({ inmateId, reason: 'Missing department', workAssignId });
-          continue;
-        }
-        const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type)
-        if (!checkLimit.status) {
-          results.failed.push({ inmateId, reason: checkLimit.message, workAssignId });
-          continue;
-        }
-
-        workAssignId = new mongoose.Types.ObjectId(Departments[0]._id);
-
-        try {
-
-          const wage = parseInt(wageAmount || 0);
-          if (!wage || isNaN(wage)) {
-            results.skipped.push(inmateId);
-            continue;
-          } else {
-            const newEntry = new Financial({
-              inmateId,
-              transaction,
-              workAssignId,
-              hoursWorked: parseInt(hoursWorked || 0),
-              wageAmount: wage,
-              type,
-              status: "ACTIVE",
-              custodyType
-            });
-
-            await newEntry.save();
-            if (wage > 0) {
-              const inmate = await Inmate.findOne({ inmateId });
-              if (inmate) {
-                inmate.balance += wage;
-                inmate.custodyType = custodyType;
-                await inmate.save();
-              } else {
-                results.failed.push({ inmateId, reason: 'Inmate not found for balance update' });
-                continue;
-              }
+          await newEntry.save();
+          if (wage > 0) {
+            const inmate = await Inmate.findOne({ inmateId });
+            if (inmate) {
+              inmate.balance += wage;
+              inmate.custodyType = custodyType;
+              await inmate.save();
+            } else {
+              results.failed.push({ inmateId, reason: 'Inmate not found for balance update' });
+              continue;
             }
-            results.created.push(inmateId);
           }
-        } catch (err) {
-          results.failed.push({ inmateId, reason: 'Save failed', error: err.message, custodyType });
+          results.created.push(inmateId);
         }
+      } catch (err) {
+        results.failed.push({ inmateId, reason: 'Save failed', error: err.message, custodyType });
       }
+    }
 
-
-      await logAudit({
-        userId: req.user.id,
-        username: req.user.username,
-        action: 'BULK_UPSERT',
-        targetModel: 'Financial',
-        targetId: null,
-        description: `Bulk upsert of wages performed. Created: ${results.created.length}, Updated: ${results.skipped.length}, Failed: ${results.failed.length}`,
-        changes: results
-      });
-      res.status(200).json({
-        success: true,
-        message: 'Bulk financial operation completed',
-        results
-      });
-
-
-
-    })
+    await logAudit({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'BULK_UPSERT',
+      targetModel: 'Financial',
+      targetId: null,
+      description: `Bulk upsert of wages performed. Created: ${results.created.length}, Updated: ${results.skipped.length}, Failed: ${results.failed.length}`,
+      changes: results
+    });
+    res.status(200).json({
+      success: true,
+      message: 'Bulk financial operation completed',
+      results
+    });
   } catch (err) {
+    if (err instanceof LocationAccessError) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     res.status(500).json({ success: false, message: 'Internal server error', error: err.message });
   } finally {
-    await InmateLocation.findByIdAndUpdate(req.body.location, { $set: { purchaseStatus: "approved" } })
+    if (locationId) {
+      await InmateLocation.findByIdAndUpdate(locationId, { $set: { purchaseStatus: "approved" } });
+    }
   }
 };
 

@@ -26,7 +26,8 @@ const authenticateToken = (req, res, next) => {
     req.user = {
       id: user.id,
       username: user.username,
-      role:user.role
+      role: userExist.role || user.role,
+      location_id: userExist.location_id ? userExist.location_id.toString() : null
     };
     next();
   });
