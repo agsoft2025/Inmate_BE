@@ -352,7 +352,13 @@ const bulkUpsertFinancial = async (req, res) => {
         continue;
       }
 
-      const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type)
+      const inmateData = await Inmate.findOne({ inmateId }).populate("location_id");
+      if (!inmateData || !inmateData.location_id) {
+        results.failed.push({ inmateId, reason: "Inmate or location missing" });
+        continue;
+      }
+      const locationId = inmateData.location_id._id || inmateData.location_id;
+      const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type, locationId);
       if (!checkLimit.status) {
         results.failed.push({ inmateId, reason: checkLimit.message, workAssignId });
         continue;
@@ -375,6 +381,7 @@ const bulkUpsertFinancial = async (req, res) => {
             type,
             status: "ACTIVE",
             custodyType
+            , location_id: locationId
           });
 
           await newEntry.save();

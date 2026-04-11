@@ -87,7 +87,7 @@ exports.getVendorPurchaseSummary1 = async (query) => {
   return await StoreItem.aggregate(pipeline);
 };
 
-exports.getVendorPurchaseSummary = async (query) => {
+exports.getVendorPurchaseSummary = async (query, locationFilter = {}) => {
   const {
     search, 
     startDate,
@@ -106,7 +106,13 @@ exports.getVendorPurchaseSummary = async (query) => {
   if (startDate) dateFilter.$gte = new Date(startDate);
   if (endDate)   dateFilter.$lte = new Date(endDate);
 
-  const pipeline = [
+  const pipeline = [];
+  const hasLocationFilter = locationFilter && Object.keys(locationFilter).length > 0;
+  if (hasLocationFilter) {
+    pipeline.push({ $match: locationFilter });
+  }
+
+  pipeline.push(
     {
       // Optional match for itemName if search provided
       $match: search
@@ -167,7 +173,8 @@ exports.getVendorPurchaseSummary = async (query) => {
     { $sort: { [sortField]: sortOrder } },
     { $skip: (pageNum - 1) * limitNum },
     { $limit: limitNum },
-  ];
+  );
+
   return await StoreItem.aggregate(pipeline);
 };
 

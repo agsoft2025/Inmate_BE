@@ -5,9 +5,7 @@ const inmateSchema = new mongoose.Schema(
     inmateId: {
       type: String,
       required: true,
-      unique: true,
-      trim: true,
-      index: true
+      trim: true
     },
 
     firstName: {
@@ -29,7 +27,6 @@ const inmateSchema = new mongoose.Schema(
     phonenumber: {
       type: String,
       required: true,
-      unique: true,
       match: /^(?:\+91|0)?[6-9]\d{9}$/, // allow optional +91 or 0 prefix
       index: true
     },
@@ -140,6 +137,8 @@ const inmateSchema = new mongoose.Schema(
 /* Compound indexes for real-world queries */
 inmateSchema.index({ location_id: 1, status: 1 });
 inmateSchema.index({ custodyType: 1, isBlocked: 1 });
+inmateSchema.index({ location_id: 1, inmateId: 1 }, { unique: true });
+inmateSchema.index({ location_id: 1, phonenumber: 1 }, { unique: true });
 
 /* Soft delete helper */
 inmateSchema.methods.softDelete = function () {

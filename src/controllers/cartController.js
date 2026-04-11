@@ -4,6 +4,7 @@ const Inmate = require("../model/inmateModel");
 const mongoose = require("mongoose");
 const logAudit = require("../utils/auditlogger");
 const { checkTransactionLimit, checkProductsLimit } = require("../utils/inmateTransactionLimiter");
+const { buildLocationFilter } = require("../utils/locationAccess");
 const userModel = require("../model/userModel");
 const InmateLocation = require("../model/inmateLocationModel");
 const inmateModel = require("../model/inmateModel");
@@ -292,14 +293,15 @@ const PaymentLog = require("../model/PaymentLog");
 const createPOSCart = async (req, res) => {
   try {
     const { inmateId, totalAmount, products } = req.body;
-    const userData = await userModel.findById(req.user.id).populate("location_id")
-    location_id = userData.location_id
-    if (!userData.location_id) {
-      return res.status(404).send({ success: false, message: "This user has no location" })
+    const userData = await userModel.findById(req.user.id).populate("location_id");
+    const userLocation = userData.location_id;
+    if (!userLocation) {
+      return res.status(404).send({ success: false, message: "This user has no location" });
     }
-    if (userData.location_id.purchaseStatus === "denied") {
-      return res.status(403).send({ success: false, message: "Our application is undergoing maintenance. Please try again in a little while" })
+    if (userLocation.purchaseStatus === "denied") {
+      return res.status(403).send({ success: false, message: "Our application is undergoing maintenance. Please try again in a little while" });
     }
+    const locationObjectId = userLocation._id || userLocation;
     const depositLim = await checkTransactionLimit(inmateId, totalAmount, type = "spend");
     if (!depositLim.status) {
       return res.status(400).send({ success: false, message: depositLim.message });
@@ -358,7 +360,7 @@ const createPOSCart = async (req, res) => {
     }
 
     // Create POS cart
-    const newCart = new POSShoppingCart({ inmateId, totalAmount, products });
+    const newCart = new POSShoppingCart({ inmateId, totalAmount, products, location_id: locationObjectId });
     const savedCart = await newCart.save();
 
     // Deduct balance
@@ -868,7 +870,8 @@ const createPOSCartLatest = async (req, res) => {
       inmateId: inmate._id,
       totalAmount,
       products: productDetails,
-      status: "pending"
+      status: "pending",
+      location_id: userData.location_id._id || userData.location_id
     });
     const savedCart = await newCart.save();
     console.log("🛒 CART CREATED:", savedCart._id);
@@ -1160,13 +1163,21 @@ const createPOSCartLatest = async (req, res) => {
 
 const getAllPOSCarts = async (req, res) => {
   try {
-    const carts = await POSShoppingCart.find().populate("products.productId").sort({ createdAt: -1 });
-
-    if (!carts || carts.length === 0) {
-      return res.status(404).json({ success: false, message: "No carts found", data: [] });
+    const locationFilter = req.locationFilter ?? buildLocationFilter(req.user);
+    if (req.locationRestricted && !locationFilter.location_id) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+      });
     }
+    const carts = await POSShoppingCart.find({ ...locationFilter })
+      .populate("products.productId")
+      .sort({ createdAt: -1 });
 
-    res.status(200).json({ success: true, data: carts });
+    return res.status(200).json({
+      success: true,
+      data: carts || [],
+    });
   } catch (error) {
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }

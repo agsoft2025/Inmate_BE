@@ -7,7 +7,7 @@ const faceapi = require('face-api.js');
 const inmateModel = require("../model/inmateModel");
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
 const { findByIdAndUpdate } = require("../model/departmentModel");
-const { resolveLocationId, buildLocationFilter, LocationAccessError, isSuperAdminRole } = require("../utils/locationAccess");
+const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 
 const defaultUser = async (req, res) => {
     try {
@@ -213,7 +213,7 @@ const getAllUsers = async (req, res) => {
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     try {
-        const locationFilter = buildLocationFilter(req.user);
+        const locationFilter = requireLocationFilter(req.user);
         const totalUsers = await UserSchema.countDocuments(locationFilter);
 
         const users = await UserSchema.find(locationFilter)
@@ -236,6 +236,9 @@ const getAllUsers = async (req, res) => {
             message: "Users fetched successfully",
         });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({
             success: false,
             message: 'Internal server error',
@@ -253,18 +256,24 @@ const getUserById = async (req, res) => {
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({ message: "Invalid ID format" });
         }
-        const user = await UserSchema.findById(id).select('-password');
+        const locationFilter = requireLocationFilter(req.user);
+        const user = await UserSchema.findOne({ _id: id, ...locationFilter }).select('-password');
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
         res.json({ success: true, data: user });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };
 
 const updateUserById = async (req, res) => {
     try {
+        const locationFilter = requireLocationFilter(req.user);
+
         const { username, fullname, role, newPassword, oldPassword, descriptor, locationId } = req.body;
         const updateData = {};
         if (locationId) {
@@ -291,7 +300,7 @@ const updateUserById = async (req, res) => {
         }
 
         // Fetch existing user
-        const user = await UserSchema.findById(req.params.id);
+        const user = await UserSchema.findOne({ _id: req.params.id, ...locationFilter });
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -325,8 +334,8 @@ const updateUserById = async (req, res) => {
         if (descriptor) updateData.descriptor = descriptor
 
         // Update user
-        const updatedUser = await UserSchema.findByIdAndUpdate(
-            req.params.id,
+        const updatedUser = await UserSchema.findOneAndUpdate(
+            { _id: req.params.id, ...locationFilter },
             { $set: updateData },
             { new: true, runValidators: true }
         ).select('-password');
@@ -345,13 +354,17 @@ const updateUserById = async (req, res) => {
         res.json({ success: true, data: updatedUser, message: 'User updated successfully' });
 
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };
 
 const deleteUser = async (req, res) => {
     try {
-        const deletedUser = await UserSchema.findByIdAndDelete(req.params.id);
+        const locationFilter = requireLocationFilter(req.user);
+        const deletedUser = await UserSchema.findOneAndDelete({ _id: req.params.id, ...locationFilter });
         if (!deletedUser) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -371,6 +384,9 @@ const deleteUser = async (req, res) => {
         });
         res.json({ success: true, message: 'User deleted successfully' });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };

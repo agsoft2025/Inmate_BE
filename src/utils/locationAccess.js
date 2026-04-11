@@ -57,9 +57,47 @@ const buildLocationFilter = (user) => {
   return { location_id: new mongoose.Types.ObjectId(user.location_id) };
 };
 
+const requireLocationFilter = (user) => {
+  const locationFilter = buildLocationFilter(user);
+  const hasLocation = Boolean(locationFilter.location_id);
+
+  if (!hasLocation && !isSuperAdminRole(user?.role)) {
+    throw new LocationAccessError("Location is required", 404);
+  }
+
+  return locationFilter;
+};
+
+const attachLocationFilter = (req, res, next) => {
+  try {
+    req.locationFilter = requireLocationFilter(req.user);
+    next();
+  } catch (error) {
+    if (error instanceof LocationAccessError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
+    next(error);
+  }
+};
+
+const attachOptionalLocationFilter = (req, res, next) => {
+  try {
+    req.locationFilter = buildLocationFilter(req.user);
+    req.locationRestricted = Boolean(
+      req.user && !isSuperAdminRole(req.user.role) && !req.user.location_id
+    );
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   LocationAccessError,
   resolveLocationId,
   buildLocationFilter,
   isSuperAdminRole,
+  requireLocationFilter,
+  attachLocationFilter,
+  attachOptionalLocationFilter,
 };

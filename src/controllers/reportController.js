@@ -8,9 +8,12 @@ const moment = require('moment');
 const { getVendorPurchaseSummary } = require('../service/storeInventoryService');
 const tuckShopModel = require('../model/tuckShopModel');
 const storeInventory = require('../model/storeInventory');
+const { requireLocationFilter } = require("../utils/locationAccess");
 
 exports.quickStatistics = async (req, res) => {
     try {
+        const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+        if (!locationFilter) return;
         const tmpDate = new Date();
         const y = tmpDate.getFullYear();
         const m = tmpDate.getMonth();
@@ -20,12 +23,15 @@ exports.quickStatistics = async (req, res) => {
         let monthlyWagesPaid = 0;
 
         const totalBalanceAgg = await Inmate.aggregate([
+            { $match: locationFilter },
             { $group: { _id: null, totalBalance: { $sum: "$balance" } } }
         ]);
         const totalSystemBalance = totalBalanceAgg[0]?.totalBalance || 0;
 
+        const locationInmateIds = (await Inmate.find(locationFilter).select('inmateId').lean()).map(i => i.inmateId);
         const todaysFinancialTransactions = await Financial.find({
-            createdAt: { $gte: todayStart }
+            createdAt: { $gte: todayStart },
+            ...(locationInmateIds.length ? { inmateId: { $in: locationInmateIds } } : { _id: null })
         });
 
         todaysFinancialTransactions.forEach(finance => {
@@ -232,12 +238,15 @@ exports.intimateBalanceReport1 = async (req, res) => {
 };
 
 exports.intimateBalanceReport = async (req, res) => {
-    try {
-        const { startDate, endDate, dateRange, format = "json", inmateId } = req.body;
+  try {
+    const { startDate, endDate, dateRange, format = "json", inmateId } = req.body;
 
-        if ((!dateRange && (!startDate || !endDate))) {
-            return res.status(400).json({ message: "Missing required fields" });
-        }
+    const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+    if (!locationFilter) return;
+
+    if ((!dateRange && (!startDate || !endDate))) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
 
         let fromDate, toDate = new Date();
         toDate.setHours(23, 59, 59, 999);
@@ -269,10 +278,10 @@ exports.intimateBalanceReport = async (req, res) => {
         let inmates = [];
 
         if (inmateId) {
-            const inmate = await Inmate.findOne({ inmateId }).lean();
-            if (!inmate) {
-                return res.status(404).json({ success: false, message: "Inmate not found" });
-            }
+        const inmate = await Inmate.findOne({ inmateId, ...locationFilter }).lean();
+        if (!inmate) {
+          return res.status(404).json({ success: false, message: "Inmate not found" });
+        }
 
             inmate.financialHistory = await Financial.find({ inmateId }).lean();
             inmate.shoppingHistory = await POSShoppingCart.find({ inmateId }).populate('products.productId').lean();
@@ -286,11 +295,13 @@ exports.intimateBalanceReport = async (req, res) => {
 
             inmates.push(inmate);
         } else {
-            inmates = await Inmate.find({
-                createdAt: { $gte: fromDate, $lte: toDate }
-            }).lean();
+            const baseFilter = {
+              ...locationFilter,
+              createdAt: { $gte: fromDate, $lte: toDate }
+            };
+            inmates = await Inmate.find(baseFilter).lean();
             if (!inmates.length) {
-                return res.status(404).json({ success: false, message: "No inmates found" });
+              return res.status(404).json({ success: false, message: "No inmates found" });
             }
 
             for (let inmate of inmates) {
@@ -432,12 +443,19 @@ exports.intimateBalanceReport = async (req, res) => {
 
 exports.transactionSummaryReport = async (req, res) => {
     try {
-        const { dateRange = "yearly", format = "json", department } = req.body;
+        console.log("<><>req.body", req.body);
+        const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+        console.log("<><>locationFilter",locationFilter);
+        if (!locationFilter) return;
+
+        const rawRange = req.body.dateRange;
+        const { format = "json", department } = req.body;
+        const dateRange = (rawRange || "yearly").toLowerCase();
 
         const now = new Date();
         let startDate;
 
-        switch (dateRange.toLowerCase()) {
+        switch (dateRange) {
             case "daily":
                 startDate = new Date(now.setHours(0, 0, 0, 0));
                 break;
@@ -461,11 +479,17 @@ exports.transactionSummaryReport = async (req, res) => {
 
         // Fetch data
         const [posTransactions, financialTransactions] = await Promise.all([
-            POSShoppingCart.find({ createdAt: { $gte: startDate } })
+            POSShoppingCart.find({
+                ...locationFilter,
+                createdAt: { $gte: startDate }
+            })
                 .populate("products.productId")
                 .lean(),
-            Financial.find({ createdAt: { $gte: startDate } }).lean()
-        ]);
+            Financial.find({
+                ...locationFilter,
+                createdAt: { $gte: startDate }
+            }).lean()
+        ])
 
         // Merge data
         const allTransactions = [
@@ -491,6 +515,13 @@ exports.transactionSummaryReport = async (req, res) => {
         allTransactions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
         // CSV Export
+        if (allTransactions.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No transactions found for the selected filters"
+            });
+        }
+
         if (format === "csv") {
             const fields = ["inmateId", "transaction", "source", "amount", "type", "createdAt"];
             const parser = new Parser({ fields });
@@ -509,6 +540,7 @@ exports.transactionSummaryReport = async (req, res) => {
         });
 
     } catch (error) {
+        console.log("<><>error", error);
         return res.status(500).json({
             success: false,
             message: "Internal server error",
@@ -520,19 +552,26 @@ exports.transactionSummaryReport = async (req, res) => {
 exports.tuckShopSalesReport = async (req, res) => {
     try {
         let { startDate, endDate, dateRange, format = 'json' } = req.body;
+        const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+        if (!locationFilter) return;
 
-        if ((!dateRange && (!startDate || !endDate))) {
-            return res.status(400).json({ message: 'Missing required fields' });
-        }
-
+        const rawRange = (dateRange || "").trim().toLowerCase();
         let fromDate, toDate = new Date();
         toDate.setHours(23, 59, 59, 999);
 
-        if (dateRange) {
+        const hasStartEnd = startDate && endDate;
+        const useDateRange = Boolean(rawRange);
+        const effectiveRange = useDateRange ? rawRange : (hasStartEnd ? null : "yearly");
+
+        if (!effectiveRange && !hasStartEnd) {
+            return res.status(400).json({ message: 'Missing required fields' });
+        }
+
+        if (effectiveRange) {
             fromDate = new Date();
             fromDate.setHours(0, 0, 0, 0);
 
-            switch (dateRange) {
+            switch (effectiveRange) {
                 case '7daysago':
                     fromDate.setDate(fromDate.getDate() - 6);
                     break;
@@ -552,9 +591,12 @@ exports.tuckShopSalesReport = async (req, res) => {
             toDate.setHours(23, 59, 59, 999);
         }
 
-        const transactions = await POSShoppingCart.find({
+        const baseFilter = {
+            ...locationFilter,
             createdAt: { $gte: fromDate, $lte: toDate }
-        })
+        };
+
+        const transactions = await POSShoppingCart.find(baseFilter)
             .populate('products.productId', 'itemName price category')
             .lean();
 

@@ -9,8 +9,22 @@ const formatDateToYYYYMMDD = require("../utils/dateFormat");
 const financialModel = require("../model/financialModel");
 const userModel = require("../model/userModel");
 const InmateLocation = require("../model/inmateLocationModel");
-const { resolveLocationId, buildLocationFilter, LocationAccessError } = require("../utils/locationAccess");
+const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 const { normalizeIndianMobile, isValidIndianMobile } = require("../utils/phoneUtils");
+
+const STATUS_MAP = {
+  active: "Active",
+  "on bail": "On Bail",
+  "on parole": "On Parole",
+  released: "Released",
+  transfer: "Transfer"
+};
+
+const normalizeStatus = (status = "") => {
+  if (!status || typeof status !== "string") return "Active";
+  const normalized = status.trim().toLowerCase();
+  return STATUS_MAP[normalized] || "Active";
+};
 const POSShoppingCart = require('../model/posShoppingCart');
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
 const normalizePhoneNumber = (value) => {
@@ -22,9 +36,22 @@ const normalizePhoneNumber = (value) => {
     .trim();
 };
 
+const getLocationFilterOrAbort = (req, res) => {
+  try {
+    return requireLocationFilter(req.user);
+  } catch (error) {
+    if (error instanceof LocationAccessError) {
+      res.status(error.status).json({ success: false, message: error.message });
+      return null;
+    }
+    throw error;
+  }
+};
+
 const downloadInmatesCSV1 = async (req, res) => {
   try {
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const inmates = await Inmate.find(locationFilter).lean();
 
     if (!inmates || inmates.length === 0) {
@@ -66,7 +93,8 @@ const downloadInmatesCSV1 = async (req, res) => {
 
 const downloadInmatesCSV = async (req, res) => {
   try {
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const inmates = await Inmate.find(locationFilter).lean();
 
     if (!inmates || inmates.length === 0) {
@@ -112,8 +140,6 @@ const downloadInmatesCSV = async (req, res) => {
 
 const createInmate = async (req, res) => {
   try {
-    console.log("<><>req.body",req.body);
-    
     const { inmateId, firstName, lastName, cellNumber, dateOfBirth, admissionDate, status, crimeType, custodyType, locationId, descriptor ,phonenumber} = req.body;     
     let assignedLocationId;
     try {
@@ -135,7 +161,7 @@ const createInmate = async (req, res) => {
       }
     }
 
-    if (!inmateId || !firstName || !lastName || status === undefined || !phonenumber) {
+    if (!inmateId || !firstName || !lastName || !phonenumber) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
@@ -144,11 +170,22 @@ const createInmate = async (req, res) => {
     }
 
     const normalizedPhone = normalizeIndianMobile(phonenumber);
-    const existingInmateID = await InmateSchema.findOne({ inmateId });
+    const existingInmateID = await InmateSchema.findOne({
+      inmateId,
+      location_id: assignedLocationId,
+    });
 
     if (existingInmateID) {
-
       return res.status(400).json({ success: false, message: "Inmate ID already exist" })
+    }
+
+    const existingPhone = await InmateSchema.findOne({
+      phonenumber: normalizedPhone,
+      location_id: assignedLocationId,
+    });
+
+    if (existingPhone) {
+      return res.status(400).json({ success: false, message: "Phone number already exists for this location" });
     }
 
     const inmate = new InmateSchema({
@@ -159,7 +196,7 @@ const createInmate = async (req, res) => {
       cellNumber,
       dateOfBirth,
       admissionDate,
-      status,
+      status: normalizeStatus(status),
       crimeType,
       phonenumber: normalizedPhone,
       location_id: assignedLocationId
@@ -201,7 +238,8 @@ const getInmates = async (req, res) => {
     const { page = 1, limit = 10, sortField = 'createdAt', sortOrder, totalRecords } = req.query;
     const order = sortOrder === 'asc' ? 1 : -1;
 
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     let inmatesQuery = Inmate.find(locationFilter)
       .populate('location_id', 'locationName')
       .populate('user_id', 'descriptor')
@@ -255,7 +293,8 @@ const getInmatesID = async (req, res) => {
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
     }
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     let findInmate;
 
     if (mongoose.Types.ObjectId.isValid(id)) {
@@ -285,7 +324,8 @@ const updateInmate = async (req, res) => {
       return res.status(400).json({ message: "Invalid ID format" });
     }
 
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
 
     if (inmateId) {
       const duplicateFilter = {
@@ -317,6 +357,14 @@ const updateInmate = async (req, res) => {
         return res.status(400).json({ message: "Invalid phone number" });
       }
       updateBody.phonenumber = normalizeIndianMobile(updateBody.phonenumber);
+      const duplicatePhone = await InmateSchema.findOne({
+        phonenumber: updateBody.phonenumber,
+        ...locationFilter,
+        _id: { $ne: id },
+      });
+      if (duplicatePhone) {
+        return res.status(400).json({ success: false, message: "Phone number already in use in this location" });
+      }
     }
 
     const updatedInmate = await InmateSchema.findOneAndUpdate(
@@ -373,7 +421,8 @@ const deleteInmate = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const deletedInmate = await InmateSchema.findOneAndDelete({ ...locationFilter, _id: id });
     if (!deletedInmate) {
       return res.status(404).json({ message: "No data found" });
@@ -405,7 +454,8 @@ const searchInmates = async (req, res) => {
 
     const regex = new RegExp(query, "i");
 
-    const baseFilter = buildLocationFilter(req.user);
+    const baseFilter = getLocationFilterOrAbort(req, res);
+    if (!baseFilter) return;
     const filter = {
       ...baseFilter,
       $or: [
@@ -439,7 +489,8 @@ const getInmateUsingInmateID = async (req, res) => {
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
     }
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const findInmate = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
     if (!findInmate) {
       return res.status(404).json({ message: "No data found" });
@@ -459,13 +510,17 @@ const getInmateTransactionData = async (req, res) => {
       return res.status(400).json({ message: "ID is missing" });
     }
 
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const inmateData = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
     if (!inmateData) {
       return res.status(404).send({ success: false, message: "No data found" });
     }
 
-    let filter = { inmateId: id };
+    let filter = {
+      inmateId: id,
+      ...(locationFilter.location_id ? { location_id: locationFilter.location_id } : {})
+    };
 
     if (days) {
       const daysAgo = new Date();
@@ -640,7 +695,8 @@ const fetchInmateDataUsingFace = async (req, res) => {
     if (!bestMatch || minDistance > MATCH_THRESHOLD) {
       return res.status(400).json({ message: "Face not recognized" });
     }
-    const locationFilter = buildLocationFilter(req.user);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
     const userData = await Inmate.findOne({
       ...locationFilter,
       user_id: bestMatch._id

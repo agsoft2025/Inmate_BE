@@ -1,6 +1,89 @@
 const POSShoppingCart = require('../model/posShoppingCart');
 const Financial = require('../model/financialModel');
 const inmateModel = require('../model/inmateModel');
+const { buildLocationFilter, isSuperAdminRole } = require("../utils/locationAccess");
+
+const buildLocationContext = async (user) => {
+  const isSuper = isSuperAdminRole(user?.role);
+  const locationFilter = buildLocationFilter(user);
+  const locationObjectId = locationFilter.location_id || null;
+  const locationId = locationObjectId ? locationObjectId.toString() : null;
+
+  if (!locationId && !isSuper) {
+    return {
+      locationId: null,
+      locationObjectId: null,
+      allowedInmateIds: new Set(),
+      locationRestricted: true
+    };
+  }
+
+  let allowedInmateIds = null;
+  if (locationObjectId) {
+    const inmatesAtLocation = await inmateModel
+      .find({ location_id: locationObjectId })
+      .select("inmateId")
+      .lean();
+
+    allowedInmateIds = new Set(inmatesAtLocation.map((inmate) => inmate.inmateId));
+  }
+
+  return {
+    locationId,
+    locationObjectId,
+    allowedInmateIds,
+    locationRestricted: false
+  };
+};
+
+const filterPOSTransactionsByLocation = (transactions, context) => {
+  const { locationId, allowedInmateIds, locationRestricted } = context;
+  if (locationRestricted) return [];
+  const hasAllowedInmates = Boolean(allowedInmateIds && allowedInmateIds.size > 0);
+  if (!locationId && !hasAllowedInmates) return transactions;
+
+  return transactions.filter((trx) => {
+    if (locationId && trx.location_id?.toString() === locationId) {
+      return true;
+    }
+    if (hasAllowedInmates && allowedInmateIds.has(trx.inmateId)) {
+      return true;
+    }
+    return false;
+  });
+};
+
+const parseBooleanQuery = (value) => {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim().toLowerCase();
+  if (trimmed === "true") return true;
+  if (trimmed === "false") return false;
+  return null;
+};
+
+const filterFinancialTransactionsByLocation = (transactions, context) => {
+  const { allowedInmateIds, locationObjectId, locationRestricted } = context;
+  if (locationRestricted) return [];
+  if ((!locationObjectId && (!allowedInmateIds || allowedInmateIds.size === 0))) return [];
+
+  return transactions.filter((trx) => {
+    const sameLocation = locationObjectId
+      ? trx.location_id?.toString() === locationObjectId.toString()
+      : true;
+    const allowedInmate =
+      allowedInmateIds && allowedInmateIds.size > 0
+        ? allowedInmateIds.has(trx.inmateId)
+        : true;
+    return sameLocation && allowedInmate;
+  });
+};
+
+const applyReversedFilter = (transactions, reversedFlag) => {
+  if (reversedFlag === null) {
+    return transactions;
+  }
+  return transactions.filter((trx) => Boolean(trx.is_reversed) === reversedFlag);
+};
 
 const getTransactionsByRange1 = async (req, res) => {
   try {
@@ -198,9 +281,18 @@ const getTransactionsByRange2 = async (req, res) => {
 
 const getTransactionsByRange = async (req, res) => {
   try {
+    console.log("<><>working..............")
     const { range = "daily", page = 1, limit = 10,inmateId } = req.query;
     const now = new Date();
     let startDate;
+    const context = await buildLocationContext(req.user);
+    if (context.locationRestricted) {
+      return res.status(404).json({
+        success: false,
+        message: "Location must be assigned to access this data"
+      });
+    }
+    const { locationObjectId, allowedInmateIds } = context;
 
     // ✅ FIXED DATE LOGIC
     switch (range.toLowerCase()) {
@@ -231,12 +323,25 @@ const getTransactionsByRange = async (req, res) => {
     const skip = (pageNum - 1) * pageSize;
 
     // ✅ FETCH DATA
+    const posQuery = { createdAt: { $gte: startDate } };
+    if (locationObjectId) {
+      posQuery.location_id = locationObjectId;
+    }
+
+    const financialQuery = { createdAt: { $gte: startDate } };
+    if (allowedInmateIds) {
+      financialQuery.inmateId = { $in: Array.from(allowedInmateIds) };
+    }
+    if (locationObjectId) {
+      financialQuery.location_id = locationObjectId;
+    }
+
     const [posTransactions, financialTransactions] = await Promise.all([
-      POSShoppingCart.find({ createdAt: { $gte: startDate } })
+      POSShoppingCart.find(posQuery)
         .populate("products.productId")
         .lean(),
 
-      Financial.find({ createdAt: { $gte: startDate } })
+      Financial.find(financialQuery)
         .populate("workAssignId")
         .populate({
           path: "fileIds",
@@ -250,28 +355,33 @@ const getTransactionsByRange = async (req, res) => {
     console.log("Financial count:", financialTransactions.length);
 
     // ✅ TOTALS (FIXED)
-    const totalPosAmount = posTransactions
+    const reversedFlag = parseBooleanQuery(req.query.reversed);
+    const locationFilteredPOS = filterPOSTransactionsByLocation(posTransactions, context);
+    const filteredPOS = applyReversedFilter(locationFilteredPOS, reversedFlag);
+    const filteredFinancial = filterFinancialTransactionsByLocation(financialTransactions, context);
+
+    const totalPosAmount = locationFilteredPOS
       .filter(t => !t.is_reversed)
       .reduce((sum, t) => sum + (t.totalAmount || 0), 0);
 
-    const totalPosReversedAmount = posTransactions
+    const totalPosReversedAmount = locationFilteredPOS
       .filter(t => t.is_reversed)
       .reduce((sum, t) => sum + (t.totalAmount || 0), 0);
 
-    const totalFinancialAmount = financialTransactions.reduce(
+    const totalFinancialAmount = filteredFinancial.reduce(
       (sum, t) => sum + (t.wageAmount || t.depositAmount || 0),
       0
     );
 
     // ✅ MERGE TRANSACTIONS
     let allTransactions = [
-      ...posTransactions.map(t => ({
+      ...filteredPOS.map(t => ({
         ...t,
         source: "POS",
         amount: t.totalAmount
       })),
 
-      ...financialTransactions.map(t => ({
+      ...filteredFinancial.map(t => ({
         ...t,
         source: "FINANCIAL",
         amount: t.wageAmount || t.depositAmount || 0
@@ -287,21 +397,24 @@ const getTransactionsByRange = async (req, res) => {
     const paginated = allTransactions.slice(skip, skip + pageSize);
 
     // ✅ ADD custodyType FOR POS TRANSACTIONS
+    const enrichTransaction = async (trx) => {
+      if (trx.source === "POS") {
+        const inmate = await inmateModel
+          .findOne(
+            { inmateId: trx.inmateId },
+            { custodyType: 1, _id: 0 }
+          )
+          .lean();
+        trx.custodyType = inmate?.custodyType || null;
+      }
+      return {
+        ...trx,
+        isReversed: Boolean(trx.is_reversed)
+      };
+    };
+
     const finalTransactions = await Promise.all(
-      paginated.map(async trx => {
-        if (trx.source === "POS") {
-          const inmate = await inmateModel
-            .findOne(
-              { inmateId: trx.inmateId },
-              { custodyType: 1, _id: 0 }
-            )
-            .lean();
-
-          trx.custodyType = inmate?.custodyType || null;
-        }
-
-        return trx;
-      })
+      paginated.map(trx => enrichTransaction(trx))
     );
 
     // ✅ RESPONSE
@@ -335,6 +448,14 @@ const getTransactionsByRangeMobile = async (req, res) => {
     const { range = "daily", page = 1, limit = 10, inmateId } = req.query;
     const now = new Date();
     let startDate;
+    const context = await buildLocationContext(req.user);
+    if (context.locationRestricted) {
+      return res.status(403).json({
+        success: false,
+        message: "Location must be assigned to access this data"
+      });
+    }
+    const { locationObjectId, allowedInmateIds } = context;
 
     switch (range.toLowerCase()) {
       case "daily":
@@ -364,12 +485,32 @@ const getTransactionsByRangeMobile = async (req, res) => {
       baseQuery.inmateId = inmateId.trim();
     }
 
+    const posQuery = { ...baseQuery };
+    if (locationObjectId) {
+      posQuery.location_id = locationObjectId;
+    }
+
+    const financialQuery = { ...baseQuery };
+    if (allowedInmateIds) {
+      const allowedList = Array.from(allowedInmateIds);
+      if (financialQuery.inmateId) {
+        if (!allowedList.includes(financialQuery.inmateId)) {
+          financialQuery.inmateId = { $in: [] };
+        }
+      } else {
+        financialQuery.inmateId = { $in: allowedList };
+      }
+    }
+    if (locationObjectId) {
+      financialQuery.location_id = locationObjectId;
+    }
+
     const [posTransactions, financialTransactions] = await Promise.all([
-      POSShoppingCart.find(baseQuery)
+      POSShoppingCart.find(posQuery)
         .populate("products.productId")
         .lean(),
 
-      Financial.find(baseQuery)
+      Financial.find(financialQuery)
         .populate("workAssignId")
         .populate({
           path: "fileIds",
@@ -378,26 +519,31 @@ const getTransactionsByRangeMobile = async (req, res) => {
         .lean()
     ]);
 
-    const totalPosAmount = posTransactions
+    const reversedFlag = parseBooleanQuery(req.query.reversed);
+    const locationFilteredPOS = filterPOSTransactionsByLocation(posTransactions, context);
+    const filteredPOS = applyReversedFilter(locationFilteredPOS, reversedFlag);
+    const filteredFinancial = filterFinancialTransactionsByLocation(financialTransactions, context);
+
+    const totalPosAmount = locationFilteredPOS
       .filter(t => !t.is_reversed)
       .reduce((s, t) => s + (t.totalAmount || 0), 0);
 
-    const totalPosReversedAmount = posTransactions
+    const totalPosReversedAmount = locationFilteredPOS
       .filter(t => t.is_reversed)
       .reduce((s, t) => s + (t.totalAmount || 0), 0);
 
-    const totalFinancialAmount = financialTransactions.reduce(
+    const totalFinancialAmount = filteredFinancial.reduce(
       (s, t) => s + (t.wageAmount || t.depositAmount || 0),
       0
     );
 
     let allTransactions = [
-      ...posTransactions.map(t => ({
+      ...filteredPOS.map(t => ({
         ...t,
         source: "POS",
         amount: t.totalAmount
       })),
-      ...financialTransactions.map(t => ({
+      ...filteredFinancial.map(t => ({
         ...t,
         source: "FINANCIAL",
         amount: t.wageAmount || t.depositAmount || 0
