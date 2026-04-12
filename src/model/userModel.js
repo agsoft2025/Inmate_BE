@@ -12,7 +12,9 @@ const userSchema = new mongoose.Schema({
     subscription: { type: Boolean, default: false },
     subscriptionStart: { type: Date },
     subscriptionEnd: { type: Date },
-    subscriptionPlan:{type:String},
+    subscriptionPlan: { type: String },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date },
 
     otp: { type: String },
     otpExpiresAt: { type: Date },

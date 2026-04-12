@@ -6,7 +6,6 @@ const userModel = require("../model/userModel");
 const faceapi = require('face-api.js');
 const inmateModel = require("../model/inmateModel");
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
-const { findByIdAndUpdate } = require("../model/departmentModel");
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 
 const defaultUser = async (req, res) => {
@@ -87,78 +86,6 @@ const createUser = async (req, res) => {
     } catch (error) {
         res.status(500).json({ success: false, message: "Internal server error", error: error.message });
     }
-};
-
-const createAdminCredential = async (req, res) => {
-  try {
-    const { username, fullname, password, descriptor } = req.body;
-
-    if (!username || !fullname || !password) {
-      return res.status(400).json({
-        success: false,
-        message: "username, fullname, and password are required",
-      });
-    }
-
-    // Face check (optional)
-    if (descriptor) {
-      const checkFaceMatch = await faceRecognitionService(descriptor);
-      if (checkFaceMatch.status) {
-        return res.status(400).json({
-          success: false,
-          message: `Face already exists for user ${checkFaceMatch.username}`,
-        });
-      }
-    }
-
-    // Check existing user
-    const existingUser = await UserSchema.findOne({ username });
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: "Username already exists",
-      });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const newUser = new UserSchema({
-      username,
-      fullname,
-      password: hashedPassword,
-      role: "ADMIN",
-      location_id: null,
-      descriptor,
-    });
-
-    const savedUser = await newUser.save();
-
-    await logAudit({
-      userId: req.user.id,
-      username: req.user.username,
-      action: "CREATE",
-      targetModel: "User",
-      targetId: savedUser._id,
-      description: `Super admin created admin "${savedUser.username}"`,
-      changes: {
-        username: savedUser.username,
-        fullname: savedUser.fullname,
-        role: savedUser.role,
-      },
-    });
-
-    res.status(201).json({
-      success: true,
-      data: savedUser,
-      message: "Admin created successfully (no location assigned)",
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: "Internal server error",
-      error: error.message,
-    });
-  }
 };
 
 const faceRecongition = async (req, res) => {
@@ -407,4 +334,4 @@ const deleteFaceRecognitionRecord = async (req, res) => {
     }
 }
 
-module.exports = { createUser, createAdminCredential, getAllUsers, getUserById, updateUserById, deleteUser, defaultUser, faceRecongition, faceRecongitionMatch, deleteFaceRecognitionRecord };
+module.exports = { createUser, getAllUsers, getUserById, updateUserById, deleteUser, defaultUser, faceRecongition, faceRecongitionMatch, deleteFaceRecognitionRecord };

@@ -33,6 +33,7 @@ const backupRoutes = require('./routes/backupRoutes')
 const InmatePaymentMandateRoutes = require("./routes/InmatePaymentMandateRoutes")
 const inmatePaymentRoutes = require("./routes/inmatePaymentRoutes")
 const inmateFileUploadRoutes = require("./routes/inmateFileRoute")
+const adminRoutes = require("./routes/adminRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
@@ -52,6 +53,7 @@ app.use(cors());
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
 app.use("/user", authRoutes);
+app.use("/admin", adminRoutes);
 app.use("/inmate", authenticateToken, attachLocationFilter, inmateRoutes);
 app.use("/financial", authenticateToken, attachLocationFilter, financialRoutes);
 app.use("/tuck-shop", authenticateToken, attachLocationFilter, tuckShopRoutes);
