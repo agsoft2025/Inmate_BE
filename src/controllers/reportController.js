@@ -593,7 +593,8 @@ exports.tuckShopSalesReport = async (req, res) => {
 
         const baseFilter = {
             ...locationFilter,
-            createdAt: { $gte: fromDate, $lte: toDate }
+            createdAt: { $gte: fromDate, $lte: toDate },
+            is_reversed: { $ne: true }
         };
 
         const transactions = await POSShoppingCart.find(baseFilter)
