@@ -323,10 +323,14 @@ const getTransactionsByRange = async (req, res) => {
     const skip = (pageNum - 1) * pageSize;
 
     // ✅ FETCH DATA
-    const posQuery = { createdAt: { $gte: startDate } };
-    if (locationObjectId) {
-      posQuery.location_id = locationObjectId;
-    }
+    const dateFilter = { $gte: startDate };
+    const posQuery = {
+      $or: [
+        { createdAt: dateFilter },
+        { reversedAt: dateFilter }
+      ],
+      ...(locationObjectId ? { location_id: locationObjectId } : {})
+    };
 
     const financialQuery = { createdAt: { $gte: startDate } };
     if (allowedInmateIds) {
@@ -378,7 +382,10 @@ const getTransactionsByRange = async (req, res) => {
       ...filteredPOS.map(t => ({
         ...t,
         source: "POS",
-        amount: t.totalAmount
+        amount: t.totalAmount,
+        eventDate: t.is_reversed
+          ? t.reversedAt || t.updatedAt || t.createdAt
+          : t.createdAt
       })),
 
       ...filteredFinancial.map(t => ({
@@ -390,7 +397,7 @@ const getTransactionsByRange = async (req, res) => {
 
     // ✅ SORT BY DATE DESC
     allTransactions.sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      (a, b) => new Date(b.eventDate || b.createdAt) - new Date(a.eventDate || a.createdAt)
     );
 
     // ✅ PAGINATION
@@ -409,7 +416,8 @@ const getTransactionsByRange = async (req, res) => {
       }
       return {
         ...trx,
-        isReversed: Boolean(trx.is_reversed)
+        isReversed: Boolean(trx.is_reversed),
+        eventDate: trx.eventDate || trx.reversedAt || trx.updatedAt || trx.createdAt
       };
     };
 
@@ -480,7 +488,13 @@ const getTransactionsByRangeMobile = async (req, res) => {
     const skip = (pageNum - 1) * pageSize;
 
     // ✅ IMPORTANT PART
-    const baseQuery = { createdAt: { $gte: startDate } };
+    const dateFilter = { $gte: startDate };
+    const baseQuery = {
+      $or: [
+        { createdAt: dateFilter },
+        { reversedAt: dateFilter }
+      ],
+    };
     if (inmateId && inmateId.trim()) {
       baseQuery.inmateId = inmateId.trim();
     }
@@ -541,7 +555,10 @@ const getTransactionsByRangeMobile = async (req, res) => {
       ...filteredPOS.map(t => ({
         ...t,
         source: "POS",
-        amount: t.totalAmount
+        amount: t.totalAmount,
+        eventDate: t.is_reversed
+          ? t.reversedAt || t.updatedAt || t.createdAt
+          : t.createdAt
       })),
       ...filteredFinancial.map(t => ({
         ...t,
@@ -552,7 +569,7 @@ const getTransactionsByRangeMobile = async (req, res) => {
 
     // ✅ SORT FIRST
     allTransactions.sort(
-      (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+      (a, b) => new Date(b.eventDate || b.createdAt) - new Date(a.eventDate || a.createdAt)
     );
 
     // ✅ THEN paginate

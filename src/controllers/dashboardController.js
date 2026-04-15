@@ -31,14 +31,20 @@ const getDashboardData = async (req, res) => {
         const allowedInmateIds = allowedInmates.map(i => i.inmateId);
 
         // 3. Today's POS transactions
+        const posDateFilter = { $gte: todayStart };
         const todaysPOSFilter = {
-            createdAt: { $gte: todayStart },
-            ...posLocationFilter
+            ...posLocationFilter,
+            $or: [
+                { createdAt: posDateFilter },
+                { reversedAt: posDateFilter }
+            ]
         };
         const todaysPOSTransactions = await POSShoppingCart.find(todaysPOSFilter);
 
         // 4. Total POS sales today
-        const totalSalesToday = todaysPOSTransactions.reduce((sum, trx) => sum + trx.totalAmount, 0);
+        const totalSalesToday = todaysPOSTransactions.reduce((sum, trx) => {
+            return sum + (trx.is_reversed ? -trx.totalAmount : trx.totalAmount);
+        }, 0);
 
         // 5. Tuckshop data
         const tuckItems = await TuckShop.find(posLocationFilter);
@@ -68,7 +74,7 @@ const getDashboardData = async (req, res) => {
             ...posLocationFilter
         };
         const recentPOSTransactions = await POSShoppingCart.find(recentPOSFilter)
-            .sort({ createdAt: -1 })
+            .sort({ updatedAt: -1 })
             .limit(10)
             .populate('products.productId');
 
@@ -90,15 +96,21 @@ const getDashboardData = async (req, res) => {
                 );
 
                 const trxObj = trx.toObject ? trx.toObject() : trx; // convert Mongoose doc to plain object
+                const eventDate = trx.is_reversed
+                    ? trx.reversedAt || trx.updatedAt || trx.createdAt
+                    : trx.createdAt;
 
                 return {
                     _id: trx._id,
-                    type: 'POS',
-                    totalAmount: trx.totalAmount,
-                    createdAt: trx.createdAt,
+                    type: trx.is_reversed ? 'POS (Reversed)' : 'POS',
+                    totalAmount: trx.is_reversed ? -Math.abs(trx.totalAmount) : trx.totalAmount,
+                    createdAt: eventDate,
                     details: {
                         ...trxObj,
-                        custodyType: inmate?.custodyType || null
+                        custodyType: inmate?.custodyType || null,
+                        is_reversed: Boolean(trx.is_reversed),
+                        eventDate,
+                        status: trx.is_reversed ? "Transaction reversed" : "Completed"
                     }
                 };
             })

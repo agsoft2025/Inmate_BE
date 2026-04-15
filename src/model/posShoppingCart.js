@@ -5,6 +5,7 @@ const POSShoppingCartSchema = new mongoose.Schema(
     inmateId: { type: String, required: true, trim: true },
     totalAmount: { type: Number, default: 0 },
     is_reversed:{type:Boolean, default:false},
+    reversedAt: { type: Date, default: null },
     location_id: { type: mongoose.Schema.Types.ObjectId, ref: "InmateLocation", index: true },
     products: [
       {

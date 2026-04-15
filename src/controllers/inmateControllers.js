@@ -112,7 +112,7 @@ const downloadInmatesCSV = async (req, res) => {
       'crimeType',
       'phonenumber',
       'status',
-      'location_id',
+      // 'location_id',
       'custodyType'
     ];
 

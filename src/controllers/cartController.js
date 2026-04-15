@@ -1295,6 +1295,7 @@ const reversePOSCart = async (req, res) => {
     await inmateData.save();
 
     posCartData.is_reversed = true;
+    posCartData.reversedAt = new Date();
     await posCartData.save();
 
     await logAudit({

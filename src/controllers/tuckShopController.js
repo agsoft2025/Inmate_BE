@@ -88,7 +88,12 @@ const createTuckShop = async (req, res) => {
 const getAllTucks = async (req, res) => {
   try {
     const locationFilter = buildLocationFilter(req.user);
-    const items = await TuckShopSchema.find(locationFilter).sort({ createdAt: -1 });
+    const includeInactive = req.query.includeInactive === "true";
+    const queryFilter = { ...locationFilter };
+    if (!includeInactive) {
+      queryFilter.status = "Active";
+    }
+    const items = await TuckShopSchema.find(queryFilter).sort({ createdAt: -1 });
     if (!items) {
       return res.status(404).json({ success: false, message: "No data found" });
     }

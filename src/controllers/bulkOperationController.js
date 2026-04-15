@@ -12,17 +12,67 @@ const bcrypt = require('bcrypt');
 const InmateLocation = require('../model/inmateLocationModel');
 const { resolveLocationId, LocationAccessError } = require('../utils/locationAccess');
 const { normalizeIndianMobile, isValidIndianMobile } = require('../utils/phoneUtils');
+const { supportsTransactions } = require('../utils/dbUtils');
 // const { parse } =require('date-fns');
 
+const pickValue = (row, keys = []) => {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== "") {
+      return row[key];
+    }
+  }
+  return undefined;
+};
+
+const parseDate = (value) => {
+  if (!value) return undefined;
+
+  // Handle Excel serial numbers
+  if (!isNaN(value)) {
+    const excelEpoch = new Date(1899, 11, 30);
+    return new Date(excelEpoch.getTime() + value * 86400000);
+  }
+
+  const str = String(value).trim();
+
+  // YYYY-MM-DD (safe)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return new Date(str);
+  }
+
+  // DD-MM-YYYY or DD/MM/YYYY
+  const match = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (match) {
+    const [, dd, mm, yyyy] = match;
+    return new Date(`${yyyy}-${mm}-${dd}`);
+  }
+
+  // fallback (last attempt)
+  const parsed = new Date(str);
+  return isNaN(parsed) ? null : parsed;
+};
+
+const normalizeStatus = (value) => {
+  const str = String(value || "").trim().toLowerCase();
+  if (str === "active") return "Active";
+  if (str === "inactive") return "Inactive";
+  return value;
+};
+
 const bulkUpsertInmates = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const useTx = await supportsTransactions();
+  let session = null;
+  if (useTx) {
+    session = await mongoose.startSession();
+    session.startTransaction();
+  }
+  const sessionOpt = session ? { session } : {};
   let locationId;
 
   try {
     locationId = await resolveLocationId(req.user, req.body.location_id);
     if (!locationId) {
-      await session.abortTransaction();
+      if (session) await session.abortTransaction();
       return res.status(400).json({ success: false, message: "Location is required" });
     }
     const locationIdString = locationId.toString();
@@ -38,7 +88,7 @@ const bulkUpsertInmates = async (req, res) => {
     await InmateLocation.findByIdAndUpdate(
       locationId,
       { $set: { purchaseStatus: "denied" } },
-      { session }
+      sessionOpt
     );
 
     /* ---------- Parse file ---------- */
@@ -49,9 +99,10 @@ const bulkUpsertInmates = async (req, res) => {
       rows = parse(req.file.buffer.toString("utf8"), {
         columns: true,
         skip_empty_lines: true,
-        trim: true
+        trim: true,
+        bom: true
       });
-    } else if (ext === "xlsx") {
+    } else if (ext === "xlsx" || ext === "xls") {
       const wb = XLSX.read(req.file.buffer, { type: "buffer" });
       rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
     } else {
@@ -69,9 +120,11 @@ const bulkUpsertInmates = async (req, res) => {
     }
 
     /* ---------- Pre-fetch existing inmateIds & phones ---------- */
-    const inmateIds = rows.map(r => r.inmateId).filter(Boolean);
+    const inmateIds = rows
+      .map(r => pickValue(r, ["inmateId", "inmateID", "inmateNumber"]))
+      .filter(Boolean);
     const phones = rows
-      .map(r => normalizeIndianMobile(r.phonenumber))
+      .map(r => normalizeIndianMobile(pickValue(r, ["phonenumber", "phoneNumber", "phone"])))
       .filter(Boolean);
 
     const existingInmates = await Inmate.find(
@@ -82,7 +135,7 @@ const bulkUpsertInmates = async (req, res) => {
         ]
       },
       { inmateId: 1, phonenumber: 1 },
-      { session }
+      sessionOpt
     ).lean();
 
     const existingInmateIdSet = new Set(
@@ -103,20 +156,18 @@ const bulkUpsertInmates = async (req, res) => {
 
     /* ---------- Process rows ---------- */
     rows.forEach((row, index) => {
-      const {
-        inmateId,
-        firstName,
-        lastName,
-        phonenumber,
-        status,
-        balance = 0,
-        cellNumber,
-        crimeType,
-        custodyType,
-        dateOfBirth,
-        admissionDate,
-        location_id
-      } = row;
+      const inmateId = pickValue(row, ["inmateId", "inmateID", "inmateNumber"]);
+      const firstName = pickValue(row, ["firstName", "firstname"]);
+      const lastName = pickValue(row, ["lastName", "lastname"]);
+      const phonenumber = pickValue(row, ["phonenumber", "phoneNumber", "phone"]);
+      const status = normalizeStatus(pickValue(row, ["status"]));
+      const balance = pickValue(row, ["balance"]) ?? 0;
+      const cellNumber = pickValue(row, ["cellNumber", "cellNo"]);
+      const crimeType = pickValue(row, ["crimeType"]);
+      const custodyType = pickValue(row, ["custodyType"]);
+      const dateOfBirth = pickValue(row, ["dateOfBirth", "dob"]);
+      const admissionDate = pickValue(row, ["admissionDate"]);
+      const location_id = pickValue(row, ["location_id", "locationId"]);
       const normalizedPhone = normalizeIndianMobile(phonenumber);
 
       /* ---- Mandatory fields ---- */
@@ -164,8 +215,12 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Date validation ---- */
-      const dob = dateOfBirth ? new Date(dateOfBirth) : undefined;
-      const adm = admissionDate ? new Date(admissionDate) : undefined;
+      // const dob = dateOfBirth ? new Date(dateOfBirth) : undefined;
+      // const adm = admissionDate ? new Date(admissionDate) : undefined;
+
+      const dob = parseDate(dateOfBirth);
+      const adm = parseDate(admissionDate);
+
 
       if ((dob && isNaN(dob)) || (adm && isNaN(adm))) {
         results.failed.push({
@@ -223,7 +278,7 @@ const bulkUpsertInmates = async (req, res) => {
 
     /* ---------- Insert inmates ---------- */
     if (inmateInsertOps.length) {
-      await Inmate.bulkWrite(inmateInsertOps, { session });
+      await Inmate.bulkWrite(inmateInsertOps, sessionOpt);
     }
 
     /* ---------- Create users ---------- */
@@ -240,7 +295,7 @@ const bulkUpsertInmates = async (req, res) => {
         }))
       );
 
-      createdUsers = await userModel.insertMany(usersPayload, { session });
+      createdUsers = await userModel.insertMany(usersPayload, sessionOpt);
     }
 
     /* ---------- Link user_id back to inmates ---------- */
@@ -252,17 +307,17 @@ const bulkUpsertInmates = async (req, res) => {
         }
       }));
 
-      await Inmate.bulkWrite(linkOps, { session });
+      await Inmate.bulkWrite(linkOps, sessionOpt);
     }
 
     /* ---------- Unlock location ---------- */
     await InmateLocation.findByIdAndUpdate(
       locationId,
       { $set: { purchaseStatus: "approved" } },
-      { session }
+      sessionOpt
     );
 
-    await session.commitTransaction();
+    if (session) await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
@@ -271,7 +326,8 @@ const bulkUpsertInmates = async (req, res) => {
     });
 
   } catch (error) {
-    await session.abortTransaction();
+    console.log("Error in bulkUpsertInmates:", error);
+    if (session) await session.abortTransaction();
     if (error instanceof LocationAccessError) {
       return res.status(error.status).json({ success: false, message: error.message });
     }
@@ -281,7 +337,7 @@ const bulkUpsertInmates = async (req, res) => {
       error: error.message
     });
   } finally {
-    session.endSession();
+    if (session) session.endSession();
   }
 };
 
@@ -311,9 +367,10 @@ const bulkUpsertFinancial = async (req, res) => {
         columns: true,
         skip_empty_lines: true,
         trim: true,
+        bom: true,
         delimiter: ','
       });
-    } else if (ext === 'xlsx') {
+    } else if (ext === 'xlsx' || ext === 'xls') {
       const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
       const sheetName = workbook.SheetNames[0];
       records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);

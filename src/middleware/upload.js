@@ -4,7 +4,7 @@ const path = require('path');
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
-  const allowedTypes = ['.csv', '.xlsx'];
+  const allowedTypes = ['.csv', '.xlsx', '.xls'];
   const ext = path.extname(file.originalname).toLowerCase();
   if (allowedTypes.includes(ext)) {
     cb(null, true);
