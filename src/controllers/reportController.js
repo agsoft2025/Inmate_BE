@@ -237,7 +237,7 @@ exports.intimateBalanceReport1 = async (req, res) => {
     }
 };
 
-exports.intimateBalanceReport = async (req, res) => {
+exports.intmateBalanceReport1 = async (req, res) => {
   try {
     const { startDate, endDate, dateRange, format = "json", inmateId } = req.body;
 
@@ -441,15 +441,131 @@ exports.intimateBalanceReport = async (req, res) => {
     }
 };
 
+exports.intmateBalanceReport = async (req, res) => {
+  try {
+    const { inmateId, startDate, endDate, dateRange, format = "json" } = req.body;
+
+    const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+    if (!locationFilter) return;
+
+    let fromDate, toDate = new Date();
+    toDate.setHours(23, 59, 59, 999);
+
+    // ✅ Date handling
+    if (dateRange) {
+      fromDate = new Date();
+      fromDate.setHours(0, 0, 0, 0);
+
+      switch (dateRange.toLowerCase()) {
+        case '7daysago':
+          fromDate.setDate(fromDate.getDate() - 7);
+          break;
+        case '1monthago':
+          fromDate.setMonth(fromDate.getMonth() - 1);
+          break;
+        case '3monthsago':
+          fromDate.setMonth(fromDate.getMonth() - 3);
+          break;
+        default:
+          return res.status(400).json({ message: "Invalid dateRange format" });
+      }
+    } else if (startDate && endDate) {
+      fromDate = new Date(startDate);
+      toDate = new Date(endDate);
+      fromDate.setHours(0, 0, 0, 0);
+      toDate.setHours(23, 59, 59, 999);
+    }
+
+    let inmates = [];
+
+    // ✅ SINGLE
+    if (inmateId) {
+      const inmate = await Inmate.findOne({ inmateId, ...locationFilter })
+        .select('inmateId firstName lastName cellNumber balance dateOfBirth admissionDate crimeType status createdAt')
+        .lean();
+
+      if (!inmate) {
+        return res.status(404).json({ success: false, message: "Inmate not found" });
+      }
+
+      inmates.push(inmate);
+    } else {
+      // ✅ MULTIPLE
+      const filter = {
+        ...locationFilter,
+        ...(fromDate && toDate ? { createdAt: { $gte: fromDate, $lte: toDate } } : {})
+      };
+
+      inmates = await Inmate.find(filter)
+        .select('inmateId firstName lastName cellNumber balance dateOfBirth admissionDate crimeType status createdAt')
+        .lean();
+
+      if (!inmates.length) {
+        return res.status(404).json({ success: false, message: "No inmates found" });
+      }
+    }
+
+    // ✅ FORMAT DATA
+    const formatted = inmates.map(i => ({
+      inmateId: i.inmateId || '',
+      inmateName: `${i.firstName || ''} ${i.lastName || ''}`.trim(),
+      cellNumber: i.cellNumber || '',
+      balance: i.balance || 0,
+      dateOfBirth: i.dateOfBirth ? moment(i.dateOfBirth).format('DD-MM-YYYY') : '',
+      admissionDate: i.admissionDate ? moment(i.admissionDate).format('DD-MM-YYYY') : '',
+      crimeType: i.crimeType || '',
+      status: i.status || '',
+      recordType: 'Basic Info',
+      createdAt: i.createdAt ? moment(i.createdAt).format('DD-MM-YYYY hh:mm:ss A') : ''
+    }));
+
+    // ✅ CSV SUPPORT (important)
+    if (format === "csv") {
+      const fields = [
+        { label: 'Inmate ID', value: 'inmateId' },
+        { label: 'Inmate Name', value: 'inmateName' },
+        { label: 'Cell Number', value: 'cellNumber' },
+        { label: 'Balance', value: 'balance' },
+        { label: 'Date of Birth', value: 'dateOfBirth' },
+        { label: 'Admission Date', value: 'admissionDate' },
+        { label: 'Crime Type', value: 'crimeType' },
+        { label: 'Status', value: 'status' }
+      ];
+
+      const { Parser } = require('json2csv');
+      const parser = new Parser({ fields });
+      const csv = parser.parse(formatted);
+
+      res.setHeader('Content-Disposition', 'attachment; filename=inmate_balance_report.csv');
+      res.setHeader('Content-Type', 'text/csv');
+
+      return res.status(200).end(csv);
+    }
+
+    // ✅ DEFAULT JSON
+    return res.status(200).json({
+      success: true,
+      count: formatted.length,
+      data: formatted,
+      message: "Inmate(s) successfully fetched"
+    });
+
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
 exports.transactionSummaryReport = async (req, res) => {
     try {
-        console.log("<><>req.body", req.body);
         const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
-        console.log("<><>locationFilter",locationFilter);
         if (!locationFilter) return;
 
         const rawRange = req.body.dateRange;
-        const { format = "json", department } = req.body;
+        const { format = "json" } = req.body;
         const dateRange = (rawRange || "yearly").toLowerCase();
 
         const now = new Date();
@@ -481,7 +597,8 @@ exports.transactionSummaryReport = async (req, res) => {
         const [posTransactions, financialTransactions] = await Promise.all([
             POSShoppingCart.find({
                 ...locationFilter,
-                createdAt: { $gte: startDate }
+                createdAt: { $gte: startDate },
+                is_reversed: { $ne: true }
             })
                 .populate("products.productId")
                 .lean(),
@@ -540,7 +657,6 @@ exports.transactionSummaryReport = async (req, res) => {
         });
 
     } catch (error) {
-        console.log("<><>error", error);
         return res.status(500).json({
             success: false,
             message: "Internal server error",
