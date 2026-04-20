@@ -7,6 +7,9 @@ const faceapi = require('face-api.js');
 const inmateModel = require("../model/inmateModel");
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
+const { resolveAdminHierarchy, isAdminRole, isSuperAdminRole } = require("../utils/adminHierarchy");
+
+const canManageUsers = (role) => isAdminRole(role) || isSuperAdminRole(role);
 
 const defaultUser = async (req, res) => {
     try {
@@ -18,11 +21,11 @@ const defaultUser = async (req, res) => {
                 username: "Admin",
                 fullname: "Super Admin",
                 password: hashedPassword,
-                role: "ADMIN",
+                role: "SUPER ADMIN",
             });
 
             await newUser.save();
-            res.status(200).send({ success: true, message: "admin created successfully" })
+            res.status(200).send({ success: true, message: "super admin created successfully" })
         } else {
             return res.status(200).send({ success: true, message: "user already created" })
         }
@@ -34,6 +37,9 @@ const defaultUser = async (req, res) => {
 const createUser = async (req, res) => {
     try {
         const { username, fullname, role, password, locationId, descriptor } = req.body;
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         let assignedLocationId;
         try {
             assignedLocationId = await resolveLocationId(req.user, locationId);
@@ -65,7 +71,23 @@ const createUser = async (req, res) => {
         }
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const newUser = new UserSchema({ username, fullname, password: hashedPassword, role, location_id: assignedLocationId, descriptor });
+        const newUser = new UserSchema({
+            username,
+            fullname,
+            password: hashedPassword,
+            role,
+            location_id: assignedLocationId,
+            descriptor,
+        });
+
+        if (isAdminRole(role)) {
+            const hierarchy = await resolveAdminHierarchy(req.user.id);
+            newUser.createdBy = hierarchy.createdBy;
+            newUser.rootAdminId = hierarchy.rootAdminId;
+        } else if (isSuperAdminRole(role)) {
+            newUser.createdBy = req.user.id;
+            newUser.rootAdminId = req.user.id;
+        }
         const savedUser = await newUser.save();
 
         await logAudit({
@@ -140,11 +162,16 @@ const getAllUsers = async (req, res) => {
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     try {
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         const locationFilter = requireLocationFilter(req.user);
         const totalUsers = await UserSchema.countDocuments(locationFilter);
 
         const users = await UserSchema.find(locationFilter)
             .select('-password')
+            .populate('createdBy', 'username fullname role')
+            .populate('rootAdminId', 'username fullname role')
             .populate('role', 'roleName')
             .sort({ [sortField]: sortOrder })
             .skip(skip)
@@ -177,6 +204,9 @@ const getAllUsers = async (req, res) => {
 const getUserById = async (req, res) => {
     try {
         const { id } = req.params;
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         if (!id) {
             return res.status(400).json({ message: "user ID is missing" });
         }
@@ -184,7 +214,10 @@ const getUserById = async (req, res) => {
             return res.status(400).json({ message: "Invalid ID format" });
         }
         const locationFilter = requireLocationFilter(req.user);
-        const user = await UserSchema.findOne({ _id: id, ...locationFilter }).select('-password');
+        const user = await UserSchema.findOne({ _id: id, ...locationFilter })
+            .select('-password')
+            .populate('createdBy', 'username fullname role')
+            .populate('rootAdminId', 'username fullname role');
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -199,6 +232,9 @@ const getUserById = async (req, res) => {
 
 const updateUserById = async (req, res) => {
     try {
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         const locationFilter = requireLocationFilter(req.user);
 
         const { username, fullname, role, newPassword, oldPassword, descriptor, locationId } = req.body;
@@ -257,7 +293,14 @@ const updateUserById = async (req, res) => {
 
         // Optional updates
         if (fullname) updateData.fullname = fullname;
-        if (role) updateData.role = role;
+        if (role) {
+            updateData.role = role;
+            if (isAdminRole(role) && !user.rootAdminId) {
+                const hierarchy = await resolveAdminHierarchy(req.user.id);
+                updateData.createdBy = user.createdBy || hierarchy.createdBy;
+                updateData.rootAdminId = hierarchy.rootAdminId;
+            }
+        }
         if (descriptor) updateData.descriptor = descriptor
 
         // Update user
@@ -290,6 +333,9 @@ const updateUserById = async (req, res) => {
 
 const deleteUser = async (req, res) => {
     try {
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         const locationFilter = requireLocationFilter(req.user);
         const deletedUser = await UserSchema.findOneAndDelete({ _id: req.params.id, ...locationFilter });
         if (!deletedUser) {

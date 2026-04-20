@@ -2,6 +2,7 @@ const UserSchema = require("../model/userModel");
 const bcrypt = require('bcrypt');
 const logAudit = require("../utils/auditlogger");
 const { faceRecognitionService } = require("../service/faceRecognitionService");
+const { resolveAdminHierarchy } = require("../utils/adminHierarchy");
 
 const createAdminCredential = async (req, res) => {
   try {
@@ -44,6 +45,10 @@ const createAdminCredential = async (req, res) => {
       location_id: null,
       descriptor,
     });
+
+    const hierarchy = await resolveAdminHierarchy(req.user.id);
+    newUser.createdBy = hierarchy.createdBy;
+    newUser.rootAdminId = hierarchy.rootAdminId;
 
     const savedUser = await newUser.save();
 
@@ -121,6 +126,8 @@ const getAllAdmins = async (req, res) => {
     const users = await UserSchema.find(query)
       .select("-password")
       .populate("location_id")
+      .populate("createdBy", "username fullname role")
+      .populate("rootAdminId", "username fullname role")
       .sort(sortOptions)
       .skip((page - 1) * limit)
       .limit(limit);
@@ -154,7 +161,10 @@ const getAdminById = async (req, res) => {
       _id: id,
       role: "ADMIN",
       isDeleted: false
-    }).select("-password");
+    })
+      .select("-password")
+      .populate("createdBy", "username fullname role")
+      .populate("rootAdminId", "username fullname role");
 
     if (!user) {
       return res.status(404).json({
