@@ -491,7 +491,7 @@ const getInmateUsingInmateID = async (req, res) => {
     }
     const locationFilter = getLocationFilterOrAbort(req, res);
     if (!locationFilter) return;
-    const findInmate = await InmateSchema.findOne({ ...locationFilter, inmateId: id });
+    const findInmate = await InmateSchema.findOne({ ...locationFilter, inmateId: id }).populate('location_id')
     if (!findInmate) {
       return res.status(404).json({ message: "No data found" });
     }
