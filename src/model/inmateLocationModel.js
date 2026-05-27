@@ -11,6 +11,31 @@ const custodyLimitSchema = new mongoose.Schema({
     purchaseStatus: { type: String, default: 'approved' }
 }, { _id: false });
 
+const razorpaySchema = new mongoose.Schema({
+    keyId: {
+        type: String,
+        trim: true
+    },
+    keySecret: {
+        type: String,
+        trim: true,
+        select: false
+    },
+    webhookSecret: {
+        type: String,
+        trim: true,
+        select: false
+    },
+    accountNumber: {
+        type: String,
+        trim: true
+    },
+    isActive: {
+        type: Boolean,
+        default: false
+    }
+}, { _id: false });
+
 const inmateLocationSchema = new mongoose.Schema(
     {
         locationName: {
@@ -29,6 +54,7 @@ const inmateLocationSchema = new mongoose.Schema(
             type: [custodyLimitSchema],
             validate: v => v.length > 0
         },
+        razorpay:razorpaySchema,
         globalSyncStatus: {
             type: String,
             enum: ["pending", "success", "failed"],

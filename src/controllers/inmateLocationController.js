@@ -6,7 +6,7 @@ const { syncLocationToGlobal } = require("../service/globaleServer");
 
 exports.addLocation = async (req, res) => {
   try {
-    const { name, locationName, custodyLimits, baseUrl } = req.body;
+    const { name, locationName, custodyLimits, baseUrl, razorpay } = req.body;
 
     if (!name || !locationName) {
       return res.status(400).json({
@@ -30,6 +30,13 @@ exports.addLocation = async (req, res) => {
       locationName,
       baseUrl,
       custodyLimits,
+      razorpay: {
+        keyId: razorpay?.keyId || "",
+        keySecret: razorpay?.keySecret || "",
+        webhookSecret: razorpay?.webhookSecret || "",
+        accountNumber: razorpay?.accountNumber || "",
+        isActive: razorpay?.isActive || false
+      },
       createdBy: req.user.id,
       updatedBy: req.user.id
     });
@@ -91,6 +98,12 @@ exports.updateLocation = async (req, res) => {
     if (locationName) updateData.locationName = locationName;
     if (name) updateData.name = name;
     if (baseUrl) updateData.baseUrl = baseUrl;
+    if (req.body.razorpay) {
+      updateData.razorpay = {
+        ...location.razorpay?.toObject(),
+        ...req.body.razorpay
+      };
+    }
 
     if (custodyLimits) {
       const allowed = new Set([
@@ -139,10 +152,10 @@ exports.updateLocation = async (req, res) => {
 
 exports.getAllLocation = async (req, res) => {
   try {
-    console.log("Fetching all locations",req.user.id);
+    console.log("Fetching all locations", req.user.id);
     const userData = await userModel.findById(req.user.id);
     console.log("User data:", userData.location_id);
-    const response = await InmateLocation.find({_id: userData.location_id}).populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
+    const response = await InmateLocation.find({ _id: userData.location_id }).populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
     if (!response.length) {
       res.status(404).send({ success: false, data: response, message: "could not find location" })
     }
