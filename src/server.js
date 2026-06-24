@@ -33,7 +33,9 @@ const backupRoutes = require('./routes/backupRoutes')
 const InmatePaymentMandateRoutes = require("./routes/InmatePaymentMandateRoutes")
 const inmatePaymentRoutes = require("./routes/inmatePaymentRoutes")
 const inmateFileUploadRoutes = require("./routes/inmateFileRoute")
+const adminRoutes = require("./routes/adminRoutes")
 const morgan = require("morgan");
+const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
 // const allowedOrigins = ["http://localhost:5173"]
 
@@ -51,21 +53,22 @@ app.use(cors());
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
 app.use("/user", authRoutes);
-app.use("/inmate", authenticateToken, inmateRoutes);
-app.use("/financial", authenticateToken, financialRoutes);
-app.use("/tuck-shop", authenticateToken, tuckShopRoutes);
-app.use("/pos-shop-cart", authenticateToken, cartRoutes);
-app.use("/users", authenticateToken, userRoutes);
+app.use("/admin", adminRoutes);
+app.use("/inmate", authenticateToken, attachLocationFilter, inmateRoutes);
+app.use("/financial", authenticateToken, attachLocationFilter, financialRoutes);
+app.use("/tuck-shop", authenticateToken, attachLocationFilter, tuckShopRoutes);
+app.use("/pos-shop-cart", authenticateToken, attachOptionalLocationFilter, cartRoutes);
+app.use("/users", userRoutes);
 app.use("/faceRecognition",userRoutes)
-app.use("/transactions", authenticateToken, transactionRoutes);
-app.use("/dashboard", authenticateToken, dashboardRoutes);
-app.use("/reports", authenticateToken, reportRoutes);
-app.use("/logs", authenticateToken, auditLogsRoutes);
-app.use("/bulk-oprations", authenticateToken, bulkOperations);
+app.use("/transactions", authenticateToken, attachLocationFilter, transactionRoutes);
+app.use("/dashboard", authenticateToken, attachLocationFilter, dashboardRoutes);
+app.use("/reports", authenticateToken, attachLocationFilter, reportRoutes);
+app.use("/logs", authenticateToken, attachLocationFilter, auditLogsRoutes);
+app.use("/bulk-oprations", authenticateToken, attachLocationFilter, bulkOperations);
 app.use("/department", authenticateToken, departmentRoles);
 app.use("/location", authenticateToken, inmateLocationRoutes)
 // inventory and canteen operation
-app.use('/inventory',authenticateToken,inventoryRoutes)
+app.use('/inventory',authenticateToken, attachLocationFilter, inventoryRoutes)
 app.use("/backup",authenticateToken,backupRoutes)
 app.use("/mandate",InmatePaymentMandateRoutes)
 app.use("/payment",inmatePaymentRoutes)

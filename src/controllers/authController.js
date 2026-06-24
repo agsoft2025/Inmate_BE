@@ -13,7 +13,7 @@ exports.login = async (req, res) => {
         const { username, password, descriptor } = req.body;
 
         if (descriptor) {
-            const allUsers = await UserSchema.find({}, { descriptor: 1, username: 1, role: 1, fullname: 1 });
+        const allUsers = await UserSchema.find({}, { descriptor: 1, username: 1, role: 1, fullname: 1, isDeleted: 1 });
             function euclideanDistance(desc1, desc2) {
                 let sum = 0;
                 for (let i = 0; i < desc1.length; i++) {
@@ -38,6 +38,10 @@ exports.login = async (req, res) => {
 
             if (!bestMatch || minDistance > MATCH_THRESHOLD) {
                 return res.status(400).json({ message: "Face not recognized" });
+            }
+
+            if (bestMatch.isDeleted) {
+                return res.status(403).json({ message: "Account has been deactivated. Please contact the Super Admin." });
             }
 
             const token = jwt.sign(
@@ -74,6 +78,10 @@ exports.login = async (req, res) => {
         const user = await UserSchema.findOne({ username: cleanUserName })
         if (!user) {
             return res.status(400).json({ message: "Invalid credentials" });
+        }
+
+        if (user.isDeleted) {
+            return res.status(403).json({ message: "Account has been deactivated. Please contact the Super Admin." });
         }
 
         const isValidPassword = await bcrypt.compare(password, user.password);
@@ -134,6 +142,19 @@ exports.logout = async (req, res) => {
             description: `User ${user.username} logged out`
         });
 
+        // clear cookie counterparts so client resets location selection
+        res.clearCookie("selectedLocation", { path: "/" });
+        res.clearCookie(`selectedLocation_${user.id}`, { path: "/" });
+
+        res.cookie("selectedLocation", "", {
+          maxAge: 0,
+          path: "/",
+        });
+        res.cookie(`selectedLocation_${user.id}`, "", {
+          maxAge: 0,
+          path: "/",
+        });
+
         res.status(200).json({ message: "Logout successful" });
 
     } catch (error) {
@@ -152,6 +173,10 @@ exports.loginMobile = async (req, res) => {
         const user = await userModel.findOne({ username: username })
     
         if (!user) return res.status(400).send({ status: false, message: "invalid username" })
+
+        if (user.isDeleted) {
+            return res.status(403).send({ status: false, message: "Account has been deactivated. Please contact the Super Admin." });
+        }
 
         const passwordMatch = await bcrypt.compare(password, user.password)
         if (!passwordMatch) return res.status(401).send({ status: false, message: "invalid password" })
@@ -250,6 +275,10 @@ exports.verifyOTP = async (req, res) => {
         console.log("<><>user",user)
 
         if (!user) return res.status(400).send({ status: false, message: "Invalid username. Please contact admin." });
+
+        if (user.isDeleted) {
+            return res.status(403).json({ status: false, message: "Account has been deactivated. Please contact the Super Admin." });
+        }
 
         // Check if locked due to too many attempts
         if (user.otpLockedUntil && user.otpLockedUntil > Date.now()) {

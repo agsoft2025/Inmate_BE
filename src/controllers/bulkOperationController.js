@@ -10,14 +10,72 @@ const InmateSchema = require("../model/inmateModel");
 const userModel = require('../model/userModel');
 const bcrypt = require('bcrypt');
 const InmateLocation = require('../model/inmateLocationModel');
+const { resolveLocationId, LocationAccessError } = require('../utils/locationAccess');
+const { normalizeIndianMobile, isValidIndianMobile } = require('../utils/phoneUtils');
+const { supportsTransactions } = require('../utils/dbUtils');
 // const { parse } =require('date-fns');
 
+const pickValue = (row, keys = []) => {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && String(row[key]).trim() !== "") {
+      return row[key];
+    }
+  }
+  return undefined;
+};
+
+const parseDate = (value) => {
+  if (!value) return undefined;
+
+  // Handle Excel serial numbers
+  if (!isNaN(value)) {
+    const excelEpoch = new Date(1899, 11, 30);
+    return new Date(excelEpoch.getTime() + value * 86400000);
+  }
+
+  const str = String(value).trim();
+
+  // YYYY-MM-DD (safe)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return new Date(str);
+  }
+
+  // DD-MM-YYYY or DD/MM/YYYY
+  const match = str.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (match) {
+    const [, dd, mm, yyyy] = match;
+    return new Date(`${yyyy}-${mm}-${dd}`);
+  }
+
+  // fallback (last attempt)
+  const parsed = new Date(str);
+  return isNaN(parsed) ? null : parsed;
+};
+
+const normalizeStatus = (value) => {
+  const str = String(value || "").trim().toLowerCase();
+  if (str === "active") return "Active";
+  if (str === "inactive") return "Inactive";
+  return value;
+};
+
 const bulkUpsertInmates = async (req, res) => {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+  const useTx = await supportsTransactions();
+  let session = null;
+  if (useTx) {
+    session = await mongoose.startSession();
+    session.startTransaction();
+  }
+  const sessionOpt = session ? { session } : {};
+  let locationId;
 
   try {
-    const locationId = req.body.location_id;
+    locationId = await resolveLocationId(req.user, req.body.location_id);
+    if (!locationId) {
+      if (session) await session.abortTransaction();
+      return res.status(400).json({ success: false, message: "Location is required" });
+    }
+    const locationIdString = locationId.toString();
 
     if (!req.file) {
       return res.status(400).json({
@@ -30,7 +88,7 @@ const bulkUpsertInmates = async (req, res) => {
     await InmateLocation.findByIdAndUpdate(
       locationId,
       { $set: { purchaseStatus: "denied" } },
-      { session }
+      sessionOpt
     );
 
     /* ---------- Parse file ---------- */
@@ -41,9 +99,10 @@ const bulkUpsertInmates = async (req, res) => {
       rows = parse(req.file.buffer.toString("utf8"), {
         columns: true,
         skip_empty_lines: true,
-        trim: true
+        trim: true,
+        bom: true
       });
-    } else if (ext === "xlsx") {
+    } else if (ext === "xlsx" || ext === "xls") {
       const wb = XLSX.read(req.file.buffer, { type: "buffer" });
       rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
     } else {
@@ -61,8 +120,12 @@ const bulkUpsertInmates = async (req, res) => {
     }
 
     /* ---------- Pre-fetch existing inmateIds & phones ---------- */
-    const inmateIds = rows.map(r => r.inmateId).filter(Boolean);
-    const phones = rows.map(r => r.phonenumber).filter(Boolean);
+    const inmateIds = rows
+      .map(r => pickValue(r, ["inmateId", "inmateID", "inmateNumber"]))
+      .filter(Boolean);
+    const phones = rows
+      .map(r => normalizeIndianMobile(pickValue(r, ["phonenumber", "phoneNumber", "phone"])))
+      .filter(Boolean);
 
     const existingInmates = await Inmate.find(
       {
@@ -72,7 +135,7 @@ const bulkUpsertInmates = async (req, res) => {
         ]
       },
       { inmateId: 1, phonenumber: 1 },
-      { session }
+      sessionOpt
     ).lean();
 
     const existingInmateIdSet = new Set(
@@ -93,20 +156,19 @@ const bulkUpsertInmates = async (req, res) => {
 
     /* ---------- Process rows ---------- */
     rows.forEach((row, index) => {
-      const {
-        inmateId,
-        firstName,
-        lastName,
-        phonenumber,
-        status,
-        balance = 0,
-        cellNumber,
-        crimeType,
-        custodyType,
-        dateOfBirth,
-        admissionDate,
-        location_id
-      } = row;
+      const inmateId = pickValue(row, ["inmateId", "inmateID", "inmateNumber"]);
+      const firstName = pickValue(row, ["firstName", "firstname"]);
+      const lastName = pickValue(row, ["lastName", "lastname"]);
+      const phonenumber = pickValue(row, ["phonenumber", "phoneNumber", "phone"]);
+      const status = normalizeStatus(pickValue(row, ["status"]));
+      const balance = pickValue(row, ["balance"]) ?? 0;
+      const cellNumber = pickValue(row, ["cellNumber", "cellNo"]);
+      const crimeType = pickValue(row, ["crimeType"]);
+      const custodyType = pickValue(row, ["custodyType"]);
+      const dateOfBirth = pickValue(row, ["dateOfBirth", "dob"]);
+      const admissionDate = pickValue(row, ["admissionDate"]);
+      const location_id = pickValue(row, ["location_id", "locationId"]);
+      const normalizedPhone = normalizeIndianMobile(phonenumber);
 
       /* ---- Mandatory fields ---- */
       const requiredFields = {
@@ -132,7 +194,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Phone format ---- */
-      if (!/^[6-9]\d{9}$/.test(phonenumber)) {
+      if (!isValidIndianMobile(phonenumber)) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -143,7 +205,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Location validation ---- */
-      if (location_id && location_id !== locationId) {
+      if (location_id && location_id !== locationIdString) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -153,8 +215,12 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Date validation ---- */
-      const dob = dateOfBirth ? new Date(dateOfBirth) : undefined;
-      const adm = admissionDate ? new Date(admissionDate) : undefined;
+      // const dob = dateOfBirth ? new Date(dateOfBirth) : undefined;
+      // const adm = admissionDate ? new Date(admissionDate) : undefined;
+
+      const dob = parseDate(dateOfBirth);
+      const adm = parseDate(admissionDate);
+
 
       if ((dob && isNaN(dob)) || (adm && isNaN(adm))) {
         results.failed.push({
@@ -172,7 +238,7 @@ const bulkUpsertInmates = async (req, res) => {
       }
 
       /* ---- Existing phone number ---- */
-      if (existingPhoneSet.has(phonenumber)) {
+      if (existingPhoneSet.has(normalizedPhone)) {
         results.failed.push({
           row: index + 2,
           inmateId,
@@ -189,7 +255,7 @@ const bulkUpsertInmates = async (req, res) => {
             inmateId,
             firstName,
             lastName,
-            phonenumber,
+            phonenumber: normalizedPhone,
             status,
             balance: Number(balance),
             cellNumber,
@@ -207,12 +273,12 @@ const bulkUpsertInmates = async (req, res) => {
 
       // prevent duplicates within same file
       existingInmateIdSet.add(inmateId);
-      existingPhoneSet.add(phonenumber);
+      existingPhoneSet.add(normalizedPhone);
     });
 
     /* ---------- Insert inmates ---------- */
     if (inmateInsertOps.length) {
-      await Inmate.bulkWrite(inmateInsertOps, { session });
+      await Inmate.bulkWrite(inmateInsertOps, sessionOpt);
     }
 
     /* ---------- Create users ---------- */
@@ -229,7 +295,7 @@ const bulkUpsertInmates = async (req, res) => {
         }))
       );
 
-      createdUsers = await userModel.insertMany(usersPayload, { session });
+      createdUsers = await userModel.insertMany(usersPayload, sessionOpt);
     }
 
     /* ---------- Link user_id back to inmates ---------- */
@@ -241,17 +307,17 @@ const bulkUpsertInmates = async (req, res) => {
         }
       }));
 
-      await Inmate.bulkWrite(linkOps, { session });
+      await Inmate.bulkWrite(linkOps, sessionOpt);
     }
 
     /* ---------- Unlock location ---------- */
     await InmateLocation.findByIdAndUpdate(
       locationId,
       { $set: { purchaseStatus: "approved" } },
-      { session }
+      sessionOpt
     );
 
-    await session.commitTransaction();
+    if (session) await session.commitTransaction();
 
     return res.status(200).json({
       success: true,
@@ -260,141 +326,163 @@ const bulkUpsertInmates = async (req, res) => {
     });
 
   } catch (error) {
-    await session.abortTransaction();
+    console.log("Error in bulkUpsertInmates:", error);
+    if (session) await session.abortTransaction();
+    if (error instanceof LocationAccessError) {
+      return res.status(error.status).json({ success: false, message: error.message });
+    }
     return res.status(500).json({
       success: false,
       message: "Internal server error",
       error: error.message
     });
   } finally {
-    session.endSession();
+    if (session) session.endSession();
   }
 };
 
 const bulkUpsertFinancial = async (req, res) => {
+  let locationId;
   try {
-    await InmateLocation.findByIdAndUpdate(req.body.location, { $set: { purchaseStatus: "denied" } }).then(async (_d) => {
-      if (!req.file) {
-        return res.status(400).json({ message: 'No file uploaded' });
+    locationId = await resolveLocationId(req.user, req.body.location);
+    if (!locationId) {
+      return res.status(400).json({ message: 'Location is required' });
+    }
+
+    await InmateLocation.findByIdAndUpdate(
+      locationId,
+      { $set: { purchaseStatus: "denied" } }
+    );
+
+    if (!req.file) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+
+    const ext = req.file.originalname.split('.').pop().toLowerCase();
+    let records;
+
+    if (ext === 'csv') {
+      const csvString = req.file.buffer.toString('utf-8');
+      records = parse(csvString, {
+        columns: true,
+        skip_empty_lines: true,
+        trim: true,
+        bom: true,
+        delimiter: ','
+      });
+    } else if (ext === 'xlsx' || ext === 'xls') {
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    } else {
+      return res.status(400).json({ message: 'Unsupported file format' });
+    }
+
+    const results = {
+      created: [],
+      skipped: [],
+      failed: []
+    };
+
+    for (const entry of records) {
+      let {
+        inmateId,
+        custodyType,
+        wageAmount,
+        hoursWorked,
+        transaction = "WEEKLY",
+        workAssignId,
+        type = "wages"
+      } = entry;
+
+      if (!inmateId || !custodyType || !type || !wageAmount || !hoursWorked || !transaction || !workAssignId) {
+        results.failed.push({ inmateId, reason: 'Missing required fields' });
+        continue;
       }
 
-      const ext = req.file.originalname.split('.').pop().toLowerCase();
-      let records;
+      const Departments = await Department.find({
+        "name": workAssignId
+      });
 
-      if (ext === 'csv') {
-        const csvString = req.file.buffer.toString('utf-8');
-        records = parse(csvString, {
-          columns: true,
-          skip_empty_lines: true,
-          trim: true,
-          delimiter: ','
-        });
-      } else if (ext === 'xlsx') {
-        const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-        const sheetName = workbook.SheetNames[0];
-        records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
-      } else {
-        return res.status(400).json({ message: 'Unsupported file format' });
+      if (!Departments.length) {
+        results.failed.push({ inmateId, reason: 'Missing department', workAssignId });
+        continue;
       }
 
-      const results = {
-        created: [],
-        skipped: [],
-        failed: []
-      };
+      const inmateData = await Inmate.findOne({ inmateId }).populate("location_id");
+      if (!inmateData || !inmateData.location_id) {
+        results.failed.push({ inmateId, reason: "Inmate or location missing" });
+        continue;
+      }
+      const locationId = inmateData.location_id._id || inmateData.location_id;
+      const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type, locationId);
+      if (!checkLimit.status) {
+        results.failed.push({ inmateId, reason: checkLimit.message, workAssignId });
+        continue;
+      }
 
-      for (const entry of records) {
-        let {
-          inmateId,
-          custodyType,
-          wageAmount,
-          hoursWorked,
-          transaction = "WEEKLY",
-          workAssignId,
-          type = "wages"
-        } = entry;
+      workAssignId = new mongoose.Types.ObjectId(Departments[0]._id);
 
-        if (!inmateId || !custodyType || !type || !wageAmount || !hoursWorked || !transaction || !workAssignId) {
-          results.failed.push({ inmateId, reason: 'Missing required fields' });
+      try {
+        const wage = parseInt(wageAmount || 0);
+        if (!wage || isNaN(wage)) {
+          results.skipped.push(inmateId);
           continue;
-        }
+        } else {
+          const newEntry = new Financial({
+            inmateId,
+            transaction,
+            workAssignId,
+            hoursWorked: parseInt(hoursWorked || 0),
+            wageAmount: wage,
+            type,
+            status: "ACTIVE",
+            custodyType
+            , location_id: locationId
+          });
 
-        const Departments = await Department.find({
-          "name": workAssignId
-        });
-
-        if (!Departments.length) {
-          results.failed.push({ inmateId, reason: 'Missing department', workAssignId });
-          continue;
-        }
-        const checkLimit = await checkTransactionLimit(inmateId, parseInt(wageAmount), type)
-        if (!checkLimit.status) {
-          results.failed.push({ inmateId, reason: checkLimit.message, workAssignId });
-          continue;
-        }
-
-        workAssignId = new mongoose.Types.ObjectId(Departments[0]._id);
-
-        try {
-
-          const wage = parseInt(wageAmount || 0);
-          if (!wage || isNaN(wage)) {
-            results.skipped.push(inmateId);
-            continue;
-          } else {
-            const newEntry = new Financial({
-              inmateId,
-              transaction,
-              workAssignId,
-              hoursWorked: parseInt(hoursWorked || 0),
-              wageAmount: wage,
-              type,
-              status: "ACTIVE",
-              custodyType
-            });
-
-            await newEntry.save();
-            if (wage > 0) {
-              const inmate = await Inmate.findOne({ inmateId });
-              if (inmate) {
-                inmate.balance += wage;
-                inmate.custodyType = custodyType;
-                await inmate.save();
-              } else {
-                results.failed.push({ inmateId, reason: 'Inmate not found for balance update' });
-                continue;
-              }
+          await newEntry.save();
+          if (wage > 0) {
+            const inmate = await Inmate.findOne({ inmateId });
+            if (inmate) {
+              inmate.balance += wage;
+              inmate.custodyType = custodyType;
+              await inmate.save();
+            } else {
+              results.failed.push({ inmateId, reason: 'Inmate not found for balance update' });
+              continue;
             }
-            results.created.push(inmateId);
           }
-        } catch (err) {
-          results.failed.push({ inmateId, reason: 'Save failed', error: err.message, custodyType });
+          results.created.push(inmateId);
         }
+      } catch (err) {
+        results.failed.push({ inmateId, reason: 'Save failed', error: err.message, custodyType });
       }
+    }
 
-
-      await logAudit({
-        userId: req.user.id,
-        username: req.user.username,
-        action: 'BULK_UPSERT',
-        targetModel: 'Financial',
-        targetId: null,
-        description: `Bulk upsert of wages performed. Created: ${results.created.length}, Updated: ${results.skipped.length}, Failed: ${results.failed.length}`,
-        changes: results
-      });
-      res.status(200).json({
-        success: true,
-        message: 'Bulk financial operation completed',
-        results
-      });
-
-
-
-    })
+    await logAudit({
+      userId: req.user.id,
+      username: req.user.username,
+      action: 'BULK_UPSERT',
+      targetModel: 'Financial',
+      targetId: null,
+      description: `Bulk upsert of wages performed. Created: ${results.created.length}, Updated: ${results.skipped.length}, Failed: ${results.failed.length}`,
+      changes: results
+    });
+    res.status(200).json({
+      success: true,
+      message: 'Bulk financial operation completed',
+      results
+    });
   } catch (err) {
+    if (err instanceof LocationAccessError) {
+      return res.status(err.status).json({ success: false, message: err.message });
+    }
     res.status(500).json({ success: false, message: 'Internal server error', error: err.message });
   } finally {
-    await InmateLocation.findByIdAndUpdate(req.body.location, { $set: { purchaseStatus: "approved" } })
+    if (locationId) {
+      await InmateLocation.findByIdAndUpdate(locationId, { $set: { purchaseStatus: "approved" } });
+    }
   }
 };
 

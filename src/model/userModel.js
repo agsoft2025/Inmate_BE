@@ -6,13 +6,17 @@ const userSchema = new mongoose.Schema({
     password: { type: String, required: true },
     role: { type: String, required: true },
     location_id: { type: mongoose.Schema.Types.ObjectId, ref: "InmateLocation" },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    rootAdminId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     inmateId: { type: String },
     descriptor: [Number],
 
     subscription: { type: Boolean, default: false },
     subscriptionStart: { type: Date },
     subscriptionEnd: { type: Date },
-    subscriptionPlan:{type:String},
+    subscriptionPlan: { type: String },
+    isDeleted: { type: Boolean, default: false },
+    deletedAt: { type: Date },
 
     otp: { type: String },
     otpExpiresAt: { type: Date },

@@ -1,7 +1,18 @@
 const AuditLog = require('../model/auditLogModel');
+const userModel = require('../model/userModel');
+const { requireLocationFilter } = require('../utils/locationAccess');
 
 const getAuditLogs = async (req, res) => {
   try {
+    const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+    if (!locationFilter) return;
+
+    let allowedUserIds = [];
+    if (locationFilter.location_id) {
+      const usersAtLocation = await userModel.find(locationFilter).select('_id').lean();
+      allowedUserIds = usersAtLocation.map((u) => u._id);
+    }
+
     const { userId, action, fromDate, toDate, page = 1, limit = 20 } = req.query;
 
     const filter = {};
@@ -23,6 +34,21 @@ const getAuditLogs = async (req, res) => {
     const pageNumber = parseInt(page, 10);
     const pageSize = parseInt(limit, 10);
     const skip = (pageNumber - 1) * pageSize;
+
+    const isLocationRestricted = Boolean(locationFilter.location_id);
+    if (isLocationRestricted) {
+      const allowedIdsSet = new Set(allowedUserIds.map((id) => id.toString()));
+      if (filter.userId) {
+        const requestedId = filter.userId.toString();
+        if (!allowedIdsSet.has(requestedId)) {
+          filter.userId = { $in: [] };
+        }
+      } else if (allowedUserIds.length) {
+        filter.userId = { $in: allowedUserIds };
+      } else {
+        filter.userId = { $in: [] };
+      }
+    }
 
     const totalLogs = await AuditLog.countDocuments(filter);
 

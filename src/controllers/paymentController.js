@@ -10,16 +10,23 @@ const { log } = require("console");
 
 exports.inmateCreatePayment = async (req, res) => {
   try {
+    console.log("<><>req.bod");
     const { inmateId, amount } = req.body;
 
     const inmate = await inmateModel.findOne({ inmateId:inmateId });
-    console.log(inmate)
+    console.log("inmate",inmate)
+    const locationData = await InmateLocation.findById(inmate.location_id).select("+razorpay.keySecret");
+    console.log("locationData",locationData.razorpay)
+    const razorpayConfig = locationData.razorpay
+    if(!razorpayConfig || !razorpayConfig.isActive){
+      return res.status(400).json({ success: false, message: "Payment gateway not configured for this location" });
+    }
     if (!inmate) {
       return res.status(400).json({ success: false, message: "Inmate not found" });
     }
 
     const receipt = `order_INM_${inmateId}_${Date.now().toString().slice(-6)}`;
-    const order = await createOrder(amount, receipt);
+    const order = await createOrder(amount, receipt,razorpayConfig);
 
     // ✅ SAME Transaction table as student
     const transaction = await Transaction.create({

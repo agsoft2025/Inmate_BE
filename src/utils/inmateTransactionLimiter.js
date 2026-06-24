@@ -3,6 +3,7 @@ const InmateLocation = require("../model/inmateLocationModel");
 const inmateModel = require("../model/inmateModel");
 const posShoppingCart = require("../model/posShoppingCart");
 const tuckShopModel = require("../model/tuckShopModel");
+const mongoose = require("mongoose");
 
 // exports.checkTransactionLimit = async (inmateId, amount, type) => {
 //   try {
@@ -66,7 +67,7 @@ const tuckShopModel = require("../model/tuckShopModel");
 //   }
 // };
 
-exports.checkTransactionLimit = async (inmateId, amount, type) => {
+exports.checkTransactionLimit = async (inmateId, amount, type, locationId = null) => {
   try {
        // First day of the current month
     const monthStart = new Date();
@@ -78,11 +79,17 @@ exports.checkTransactionLimit = async (inmateId, amount, type) => {
         ? { $in: ["deposit", "wages"] }
         : type;
         
-    const transactions = await financialModel.find({
-      inmateId: inmateId,
+    const transactionFilter = {
+      inmateId,
       type: typeFilter,
       createdAt: { $gte: monthStart }
-    });
+    };
+
+    if (locationId) {
+      transactionFilter.location_id = new mongoose.Types.ObjectId(locationId);
+    }
+
+    const transactions = await financialModel.find(transactionFilter);
 
     let totalAmount = 0;
     if (type === "wages" || type === "deposit") {
@@ -102,14 +109,20 @@ exports.checkTransactionLimit = async (inmateId, amount, type) => {
     }
 
     const location = inmateData.location_id;
+    const locationObjectId = locationId
+      ? new mongoose.Types.ObjectId(locationId)
+      : location?._id;
+
+    if (!locationObjectId) {
+      return { status: false, message: "Location information missing for inmate" };
+    }
     
     const normalizedCustody = inmateData.custodyType
       .toLowerCase()
       .replace(/\s+/g, "_");
-    const limitObj = location.custodyLimits?.find(
-      (c) => {
-        return c.custodyType.toLowerCase() === normalizedCustody
-      }    );
+    const limitObj = location?.custodyLimits?.find(
+      (c) => c.custodyType.toLowerCase() === normalizedCustody
+    );
      if (!limitObj) {
       return {
         status: false,
@@ -143,6 +156,7 @@ exports.checkTransactionLimit = async (inmateId, amount, type) => {
     };
 
   } catch (error) {
+    console.log("checkTransactionLimit error:", error);
     return { status: false, message: "Internal server error" };
   }
 };

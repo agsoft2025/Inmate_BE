@@ -1,7 +1,9 @@
 const express = require('express');
 const { createUser, getAllUsers, getUserById, deleteUser, updateUserById, defaultUser, faceRecongition, faceRecongitionMatch, deleteFaceRecognitionRecord } = require('../controllers/usersController');
 const router = express.Router();
+const authenticateToken = require('../middleware/authToken');
 
+router.use(authenticateToken)
 router.post("/create",createUser);
 router.get("/",getAllUsers);
 router.post("/register",faceRecongition)

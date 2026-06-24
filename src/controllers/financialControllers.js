@@ -7,6 +7,7 @@ const { checkTransactionLimit } = require("../utils/inmateTransactionLimiter");
 const inmateModel = require("../model/inmateModel");
 const departmentModel = require("../model/departmentModel");
 const InmateFile = require("../model/InmateFile");
+const { requireLocationFilter } = require("../utils/locationAccess");
 
 const downloadWagesCSV = async (req, res) => {
   try {
@@ -121,13 +122,13 @@ const downloadWagesCSV = async (req, res) => {
 // };
 const createFinancial = async (req, res) => {
   try {
+    console.log("<><>req.body", req.body);
     const { inmateId, workAssignId, hoursWorked, wageAmount, transaction,
       depositType, status, relationShipId, type, depositAmount, remarks, fileIds = [] } = req.body;
     if (fileIds.length > 0) {
       const validFiles = await InmateFile.countDocuments({
         _id: { $in: fileIds }
       });
-console.log("<><>",validFiles,fileIds.length);
 
       if (validFiles !== fileIds.length) {
         return res.status(400).json({
@@ -136,7 +137,25 @@ console.log("<><>",validFiles,fileIds.length);
         });
       }
     }
-    const depositLim = await checkTransactionLimit(inmateId, type === "wages" ? wageAmount : depositAmount, type);
+    const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
+    if (!locationFilter || !locationFilter.location_id) {
+      return res.status(400).json({ success: false, message: "Location is required" });
+    }
+
+    const inmate = await InmateSchema.findOne({ inmateId, ...locationFilter }).populate('location_id');
+    if (!inmate) return res.status(404).json({ message: "Inmate not found" });
+    const locationId = locationFilter.location_id;
+
+    if (!locationId) {
+      return res.status(400).json({ success: false, message: "Inmate location is required for deposits" });
+    }
+
+    const depositLim = await checkTransactionLimit(
+      inmateId,
+      type === "wages" ? wageAmount : depositAmount,
+      type,
+      locationId
+    );
 
     if (!depositLim.status) {
       return res.status(400).send({ success: false, message: depositLim.message });
@@ -157,11 +176,6 @@ console.log("<><>",validFiles,fileIds.length);
       }
     } else {
       return res.status(400).json({ message: "Type is missing or incorrect" });
-    }
-
-    const inmate = await InmateSchema.findOne({ inmateId });
-    if (!inmate) {
-      return res.status(404).json({ message: "Inmate not found" });
     }
 
     let amountToAdd = 0;
@@ -194,7 +208,8 @@ console.log("<><>",validFiles,fileIds.length);
       depositName: "Wallet Topup",
       depositType: "MANUAL_CREDIT",
       remarks,
-      fileIds
+      fileIds,
+      location_id: locationId
     });
 
     const savedFinancial = await financial.save();
@@ -210,6 +225,7 @@ console.log("<><>",validFiles,fileIds.length);
 
     res.status(201).json({ success: true, data: savedFinancial, message: "Financial " + type + " successfully created" });
   } catch (error) {
+    console.log("<><>error",error)
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
 };

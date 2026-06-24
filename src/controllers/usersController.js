@@ -6,7 +6,10 @@ const userModel = require("../model/userModel");
 const faceapi = require('face-api.js');
 const inmateModel = require("../model/inmateModel");
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
-const { findByIdAndUpdate } = require("../model/departmentModel");
+const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
+const { resolveAdminHierarchy, isAdminRole, isSuperAdminRole } = require("../utils/adminHierarchy");
+
+const canManageUsers = (role) => isAdminRole(role) || isSuperAdminRole(role);
 
 const defaultUser = async (req, res) => {
     try {
@@ -18,11 +21,11 @@ const defaultUser = async (req, res) => {
                 username: "Admin",
                 fullname: "Super Admin",
                 password: hashedPassword,
-                role: "ADMIN",
+                role: "SUPER ADMIN",
             });
 
             await newUser.save();
-            res.status(200).send({ success: true, message: "admin created successfully" })
+            res.status(200).send({ success: true, message: "super admin created successfully" })
         } else {
             return res.status(200).send({ success: true, message: "user already created" })
         }
@@ -34,7 +37,20 @@ const defaultUser = async (req, res) => {
 const createUser = async (req, res) => {
     try {
         const { username, fullname, role, password, locationId, descriptor } = req.body;
-        if (!locationId) {
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        let assignedLocationId;
+        try {
+            assignedLocationId = await resolveLocationId(req.user, locationId);
+        } catch (error) {
+            if (error instanceof LocationAccessError) {
+                return res.status(error.status).json({ success: false, message: error.message });
+            }
+            throw error;
+        }
+
+        if (!assignedLocationId) {
             return res.status(400).json({ message: "location is required" });
         }
 
@@ -55,7 +71,23 @@ const createUser = async (req, res) => {
         }
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        const newUser = new UserSchema({ username, fullname, password: hashedPassword, role, location_id: locationId, descriptor });
+        const newUser = new UserSchema({
+            username,
+            fullname,
+            password: hashedPassword,
+            role,
+            location_id: assignedLocationId,
+            descriptor,
+        });
+
+        if (isAdminRole(role)) {
+            const hierarchy = await resolveAdminHierarchy(req.user.id);
+            newUser.createdBy = hierarchy.createdBy;
+            newUser.rootAdminId = hierarchy.rootAdminId;
+        } else if (isSuperAdminRole(role)) {
+            newUser.createdBy = req.user.id;
+            newUser.rootAdminId = req.user.id;
+        }
         const savedUser = await newUser.save();
 
         await logAudit({
@@ -130,10 +162,16 @@ const getAllUsers = async (req, res) => {
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     try {
-        const totalUsers = await UserSchema.countDocuments();
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        const locationFilter = requireLocationFilter(req.user);
+        const totalUsers = await UserSchema.countDocuments(locationFilter);
 
-        const users = await UserSchema.find()
+        const users = await UserSchema.find(locationFilter)
             .select('-password')
+            .populate('createdBy', 'username fullname role')
+            .populate('rootAdminId', 'username fullname role')
             .populate('role', 'roleName')
             .sort({ [sortField]: sortOrder })
             .skip(skip)
@@ -152,6 +190,9 @@ const getAllUsers = async (req, res) => {
             message: "Users fetched successfully",
         });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({
             success: false,
             message: 'Internal server error',
@@ -163,26 +204,58 @@ const getAllUsers = async (req, res) => {
 const getUserById = async (req, res) => {
     try {
         const { id } = req.params;
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
         if (!id) {
             return res.status(400).json({ message: "user ID is missing" });
         }
         if (!mongoose.Types.ObjectId.isValid(id)) {
             return res.status(400).json({ message: "Invalid ID format" });
         }
-        const user = await UserSchema.findById(id).select('-password');
+        const locationFilter = requireLocationFilter(req.user);
+        const user = await UserSchema.findOne({ _id: id, ...locationFilter })
+            .select('-password')
+            .populate('createdBy', 'username fullname role')
+            .populate('rootAdminId', 'username fullname role');
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
         res.json({ success: true, data: user });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };
 
 const updateUserById = async (req, res) => {
     try {
-        const { username, fullname, role, newPassword, oldPassword, descriptor } = req.body;
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        const locationFilter = requireLocationFilter(req.user);
+
+        const { username, fullname, role, newPassword, oldPassword, descriptor, locationId } = req.body;
         const updateData = {};
+        if (locationId) {
+            let resolvedLocationId;
+            try {
+                resolvedLocationId = await resolveLocationId(req.user, locationId);
+            } catch (error) {
+                if (error instanceof LocationAccessError) {
+                    return res.status(error.status).json({ success: false, message: error.message });
+                }
+                throw error;
+            }
+
+            if (!resolvedLocationId) {
+                return res.status(400).json({ success: false, message: "Invalid location" });
+            }
+
+            updateData.location_id = resolvedLocationId;
+        }
 
         const faceCheck = await faceRecognitionExcludeUserService(descriptor, req.params.id)
         if (faceCheck.status) {
@@ -190,7 +263,7 @@ const updateUserById = async (req, res) => {
         }
 
         // Fetch existing user
-        const user = await UserSchema.findById(req.params.id);
+        const user = await UserSchema.findOne({ _id: req.params.id, ...locationFilter });
         if (!user) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -220,12 +293,19 @@ const updateUserById = async (req, res) => {
 
         // Optional updates
         if (fullname) updateData.fullname = fullname;
-        if (role) updateData.role = role;
+        if (role) {
+            updateData.role = role;
+            if (isAdminRole(role) && !user.rootAdminId) {
+                const hierarchy = await resolveAdminHierarchy(req.user.id);
+                updateData.createdBy = user.createdBy || hierarchy.createdBy;
+                updateData.rootAdminId = hierarchy.rootAdminId;
+            }
+        }
         if (descriptor) updateData.descriptor = descriptor
 
         // Update user
-        const updatedUser = await UserSchema.findByIdAndUpdate(
-            req.params.id,
+        const updatedUser = await UserSchema.findOneAndUpdate(
+            { _id: req.params.id, ...locationFilter },
             { $set: updateData },
             { new: true, runValidators: true }
         ).select('-password');
@@ -244,13 +324,20 @@ const updateUserById = async (req, res) => {
         res.json({ success: true, data: updatedUser, message: 'User updated successfully' });
 
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };
 
 const deleteUser = async (req, res) => {
     try {
-        const deletedUser = await UserSchema.findByIdAndDelete(req.params.id);
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        const locationFilter = requireLocationFilter(req.user);
+        const deletedUser = await UserSchema.findOneAndDelete({ _id: req.params.id, ...locationFilter });
         if (!deletedUser) {
             return res.status(404).json({ success: false, message: 'User not found' });
         }
@@ -270,6 +357,9 @@ const deleteUser = async (req, res) => {
         });
         res.json({ success: true, message: 'User deleted successfully' });
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 };

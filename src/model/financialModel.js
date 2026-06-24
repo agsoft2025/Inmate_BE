@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const financialSchema = new mongoose.Schema({
     inmateId: { type: String, required: true },
+    location_id: { type: mongoose.Schema.Types.ObjectId, ref: "InmateLocation", index: true },
     fileIds: [
         {
             type: mongoose.Schema.Types.ObjectId,
