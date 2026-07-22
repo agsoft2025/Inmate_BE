@@ -37,7 +37,7 @@ const adminRoutes = require("./routes/adminRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
-// const allowedOrigins = ["http://localhost:5173"]
+const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutions.co.in"]
 
 // const corsOptionsDelegate = function (req, callback) {
 //     let corsOptions;
@@ -49,7 +49,7 @@ const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/
 //     callback(null, corsOptions);
 // };
 
-app.use(cors());
+app.use(cors(allowedOrigins));
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
 app.use("/user", authRoutes);

@@ -17,7 +17,7 @@ exports.addLocation = async (req, res) => {
 
     // 🔒 Ensure admin doesn't already have a location
     const existingUser = await userModel.findById(req.user.id);
-
+console.log("Existing user data:", existingUser);
     if (existingUser.location_id) {
       return res.status(400).json({
         success: false,
