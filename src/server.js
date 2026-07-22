@@ -4,6 +4,7 @@ const path = require('path');
 require('dotenv').config()
 const cors = require('cors');
 const hostname = '0.0.0.0';
+const { version: appVersion } = require('../package.json');
 const { dbConnect } = require('./config/db');
 const { scheduleBackup, rescheduleBackupOnUpdate } = require('./config/cronBackup');
 
@@ -52,6 +53,31 @@ const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutio
 app.use(cors(allowedOrigins));
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
+
+app.get('/', (req, res) => {
+    res.type('html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Inmate Backend</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .card { text-align: center; padding: 2rem 3rem; border-radius: 12px; background: #1e293b; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+        h1 { margin: 0 0 0.5rem; font-size: 1.5rem; }
+        .status { color: #4ade80; font-weight: 600; }
+        .version { margin-top: 1rem; font-size: 0.9rem; color: #94a3b8; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Inmate Backend</h1>
+        <p class="status">&#9679; Server is running</p>
+        <p class="version">Version ${appVersion}</p>
+    </div>
+</body>
+</html>`);
+});
+
 app.use("/user", authRoutes);
 app.use("/admin", adminRoutes);
 app.use("/inmate", authenticateToken, attachLocationFilter, inmateRoutes);
