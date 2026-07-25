@@ -21,7 +21,7 @@ const defaultUser = async (req, res) => {
                 username: "Admin",
                 fullname: "admin",
                 password: hashedPassword,
-                role: "SUPER ADMIN",
+                role: "ADMIN",
             });
 
             await newUser.save();
