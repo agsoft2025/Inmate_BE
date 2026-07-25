@@ -19,7 +19,7 @@ const defaultUser = async (req, res) => {
 
             const newUser = new UserSchema({
                 username: "Admin",
-                fullname: "Super Admin",
+                fullname: "admin",
                 password: hashedPassword,
                 role: "SUPER ADMIN",
             });
