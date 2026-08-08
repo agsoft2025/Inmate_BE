@@ -8,15 +8,52 @@ const logAudit = require('../utils/auditlogger');
 
 const MAX_OUTREACH_MESSAGE_LENGTH = 500;
 
+// Week-over-week delta: builds a { percent, direction } object comparing a
+// current stat-card value against its value from the same point last week.
+// Returns null when there isn't a meaningful baseline to compare against
+// (missing data), so the frontend can gracefully hide the trend badge.
+// direction is 'up' | 'down' | 'flat'. When the baseline was zero and the
+// current value is non-zero, percent is null (a % change from zero is
+// undefined) but direction is still reported as 'up'/'down'.
+function buildWeekOverWeek(current, previous) {
+    if (current === null || current === undefined || previous === null || previous === undefined) {
+        return null;
+    }
+    if (previous === 0) {
+        if (current === 0) return { percent: 0, direction: 'flat' };
+        return { percent: null, direction: current > 0 ? 'up' : 'down' };
+    }
+    const rawPercent = ((current - previous) / Math.abs(previous)) * 100;
+    if (rawPercent === 0) return { percent: 0, direction: 'flat' };
+    return {
+        percent: Math.round(Math.abs(rawPercent) * 10) / 10,
+        direction: rawPercent > 0 ? 'up' : 'down'
+    };
+}
+
 const getDashboardData = async (req, res) => {
     try {
         const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
         if (!locationFilter) return;
         const todayStart = new Date();
         todayStart.setHours(0, 0, 0, 0);
+        const now = new Date();
+
+        // How far into "today" we currently are - used so the "same time
+        // last week" comparison window covers an equal-length period rather
+        // than comparing a partial today against a full day last week.
+        const elapsedMs = now.getTime() - todayStart.getTime();
+        const weekAgoStart = new Date(todayStart.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const weekAgoSameElapsed = new Date(weekAgoStart.getTime() + elapsedMs);
 
         // 1. Total inmates
         const totalInmates = await Inmate.countDocuments(locationFilter);
+
+        // 1b. Total inmates as of a week ago (for the week-over-week badge)
+        const totalInmatesWeekAgo = await Inmate.countDocuments({
+            ...locationFilter,
+            createdAt: { $lt: weekAgoStart }
+        });
 
         // 2. Total balance across all inmates
         const totalBalanceAggPipeline = [
@@ -32,6 +69,36 @@ const getDashboardData = async (req, res) => {
         // build list of inmate IDs for the current location
         const allowedInmates = await Inmate.find(locationFilter).select('inmateId').lean();
         const allowedInmateIds = allowedInmates.map(i => i.inmateId);
+
+        // 2b. Estimated wallet balance a week ago, for the week-over-week
+        // badge. There's no stored historical balance snapshot, so this is
+        // reconstructed from the last 7 days of balance-affecting activity:
+        // non-reversed POS spend debits the balance (a reversal within the
+        // window credits it back), deposits/wages credit it, withdrawals
+        // debit it. This is a best-effort estimate, not an exact figure.
+        const last7DaysPOSFilter = {
+            ...posLocationFilter,
+            $or: [
+                { createdAt: { $gte: weekAgoStart } },
+                { reversedAt: { $gte: weekAgoStart } }
+            ]
+        };
+        const last7DaysPOSTransactions = await POSShoppingCart.find(last7DaysPOSFilter);
+        const netPOSDebitLast7Days = last7DaysPOSTransactions.reduce((sum, trx) => {
+            return sum + (trx.is_reversed ? -trx.totalAmount : trx.totalAmount);
+        }, 0);
+
+        const last7DaysFinancialFilter = {
+            createdAt: { $gte: weekAgoStart },
+            ...(allowedInmateIds.length ? { inmateId: { $in: allowedInmateIds } } : { _id: null })
+        };
+        const last7DaysFinancialTransactions = await Financial.find(last7DaysFinancialFilter);
+        const netFinancialCreditLast7Days = last7DaysFinancialTransactions.reduce((sum, trx) => {
+            const depositEffect = trx.type === 'withdrawal' ? -(trx.depositAmount || 0) : (trx.depositAmount || 0);
+            return sum + depositEffect + (trx.wageAmount || 0);
+        }, 0);
+
+        const totalBalanceWeekAgo = totalBalance + netPOSDebitLast7Days - netFinancialCreditLast7Days;
 
         // 3. Today's POS transactions
         const posDateFilter = { $gte: todayStart };
@@ -53,60 +120,11 @@ const getDashboardData = async (req, res) => {
         const tuckItems = await TuckShop.find(posLocationFilter);
         const tuckshopStockValue = tuckItems.reduce((sum, item) => sum + (item.price * item.stockQuantity), 0);
 
-        // 6. Low balance inmates (enriched with an average daily spend rate
-        //    so the frontend can estimate "days to zero" for each inmate)
+        // 6. Low balance inmates
         const lowBalanceThreshold = 100;
-        const lowBalanceInmatesRaw = await Inmate.find({
+        const lowBalanceInmates = await Inmate.find({
             ...locationFilter,
             balance: { $lt: lowBalanceThreshold }
-        }).lean();
-
-        const SPEND_LOOKBACK_DAYS = 30;
-        const spendWindowStart = new Date(todayStart);
-        spendWindowStart.setDate(spendWindowStart.getDate() - SPEND_LOOKBACK_DAYS);
-
-        const lowBalanceInmateIds = lowBalanceInmatesRaw.map(i => i.inmateId);
-
-        // Sum actual (non-reversed) POS spend per inmate over the lookback window
-        const spendAgg = lowBalanceInmateIds.length
-            ? await POSShoppingCart.aggregate([
-                {
-                    $match: {
-                        inmateId: { $in: lowBalanceInmateIds },
-                        is_reversed: { $ne: true },
-                        createdAt: { $gte: spendWindowStart }
-                    }
-                },
-                {
-                    $group: { _id: "$inmateId", totalSpent: { $sum: "$totalAmount" } }
-                }
-            ])
-            : [];
-
-        const spendByInmateId = spendAgg.reduce((acc, row) => {
-            acc[row._id] = row.totalSpent || 0;
-            return acc;
-        }, {});
-
-        const MS_PER_DAY = 24 * 60 * 60 * 1000;
-        const lowBalanceInmates = lowBalanceInmatesRaw.map(inmate => {
-            const totalSpent = spendByInmateId[inmate.inmateId] || 0;
-
-            // Don't average spend over a window longer than the inmate has
-            // actually been in the system, or a recently admitted inmate's
-            // rate would be underestimated.
-            const admissionDate = inmate.admissionDate ? new Date(inmate.admissionDate) : null;
-            const daysSinceAdmission = admissionDate
-                ? Math.floor((todayStart - admissionDate) / MS_PER_DAY)
-                : SPEND_LOOKBACK_DAYS;
-            const spendWindowDays = Math.max(1, Math.min(SPEND_LOOKBACK_DAYS, daysSinceAdmission || SPEND_LOOKBACK_DAYS));
-
-            const avgDailySpend = totalSpent > 0 ? totalSpent / spendWindowDays : 0;
-
-            return {
-                ...inmate,
-                avgDailySpend: Math.round(avgDailySpend * 100) / 100
-            };
         });
 
         // 7. Today's Financial transactions
@@ -120,6 +138,29 @@ const getDashboardData = async (req, res) => {
         const totalFinancialToday = todaysFinancialTransactions.reduce((sum, trx) => {
             return sum + (trx.depositAmount || 0) + (trx.wageAmount || 0);
         }, 0);
+
+        // 8b. Same time-of-day window, exactly a week earlier - used to
+        // compare "today so far" against "the same point last week" for the
+        // Today's Transactions / Today's Sales week-over-week badges.
+        const lastWeekWindowFilter = { $gte: weekAgoStart, $lt: weekAgoSameElapsed };
+        const lastWeekPOSFilter = {
+            ...posLocationFilter,
+            $or: [
+                { createdAt: lastWeekWindowFilter },
+                { reversedAt: lastWeekWindowFilter }
+            ]
+        };
+        const lastWeekPOSTransactions = await POSShoppingCart.find(lastWeekPOSFilter);
+        const lastWeekSalesTotal = lastWeekPOSTransactions.reduce((sum, trx) => {
+            return sum + (trx.is_reversed ? -trx.totalAmount : trx.totalAmount);
+        }, 0);
+
+        const lastWeekFinancialFilter = {
+            createdAt: lastWeekWindowFilter,
+            ...(allowedInmateIds.length ? { inmateId: { $in: allowedInmateIds } } : { _id: null })
+        };
+        const lastWeekFinancialTransactions = await Financial.find(lastWeekFinancialFilter);
+        const lastWeekTransactionCount = lastWeekPOSTransactions.length + lastWeekFinancialTransactions.length;
 
         // 9. Recent POS transactions
         const recentPOSFilter = {
@@ -180,13 +221,26 @@ const getDashboardData = async (req, res) => {
             .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
             .slice(0, 5);
 
+        const todayTransactionCount = todaysPOSTransactions.length + todaysFinancialTransactions.length;
+
+        // 12. Week-over-week deltas for the 4 summary stat cards. Each is
+        // null when there's no meaningful baseline (e.g. brand-new location
+        // with nothing recorded a week ago) - the frontend hides the badge
+        // in that case rather than showing a misleading percentage.
+        const weekOverWeek = {
+            totalInmates: buildWeekOverWeek(totalInmates, totalInmatesWeekAgo),
+            totalBalance: buildWeekOverWeek(totalBalance, totalBalanceWeekAgo),
+            todayTransactionCount: buildWeekOverWeek(todayTransactionCount, lastWeekTransactionCount),
+            totalSalesToday: buildWeekOverWeek(totalSalesToday, lastWeekSalesTotal)
+        };
+
         // Final response
         res.status(200).json({
             success: true,
             data: {
                 totalInmates,
                 totalBalance,
-                todayTransactionCount: todaysPOSTransactions.length + todaysFinancialTransactions.length,
+                todayTransactionCount,
                 totalSalesToday,
                 lowBalanceInmates,
                 tuckshop: {
@@ -197,7 +251,8 @@ const getDashboardData = async (req, res) => {
                     todayFinancialCount: todaysFinancialTransactions.length,
                     totalFinancialToday
                 },
-                recentTransactions: combinedRecentTransactions
+                recentTransactions: combinedRecentTransactions,
+                weekOverWeek
             }
         });
 
@@ -211,15 +266,9 @@ const getDashboardData = async (req, res) => {
 };
 
 // Predictive Low-Balance Outreach: records a staff-drafted, staff-approved
-// outreach message for a low-balance inmate. A human must review/edit the
-// message and click "Send" in the UI before this endpoint is ever called -
-// nothing here is triggered automatically.
-//
-// NOTE: This codebase does not currently have a freeform-text messaging
-// channel wired up (the existing WhatsApp integration in sms.service.js only
-// supports a single pre-approved OTP template, not arbitrary staff-authored
-// text). Until a real SMS/WhatsApp provider is connected, sending records an
-// audited outreach entry that location staff can act on/follow up with.
+// outreach message for a low-balance inmate. The app does not currently have
+// a general-purpose messaging provider wired here, so "send" means the
+// outreach was validated and written to the audit trail for staff follow-up.
 const sendLowBalanceOutreach = async (req, res) => {
     try {
         const locationFilter = req.locationFilter ?? requireLocationFilter(req.user);
@@ -235,6 +284,7 @@ const sendLowBalanceOutreach = async (req, res) => {
         if (!trimmedMessage) {
             return res.status(400).json({ success: false, message: "Outreach message cannot be empty" });
         }
+
         if (trimmedMessage.length > MAX_OUTREACH_MESSAGE_LENGTH) {
             return res.status(400).json({
                 success: false,
