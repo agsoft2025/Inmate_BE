@@ -8,6 +8,7 @@ const inmateModel = require("../model/inmateModel");
 const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 const { resolveAdminHierarchy, isAdminRole, isSuperAdminRole } = require("../utils/adminHierarchy");
+const { buildSearchRegex } = require("../utils/searchUtils");
 
 const canManageUsers = (role) => isAdminRole(role) || isSuperAdminRole(role);
 
@@ -166,9 +167,19 @@ const getAllUsers = async (req, res) => {
             return res.status(403).json({ success: false, message: "Access denied" });
         }
         const locationFilter = requireLocationFilter(req.user);
-        const totalUsers = await UserSchema.countDocuments(locationFilter);
 
-        const users = await UserSchema.find(locationFilter)
+        // Smart Search: matches username, full name, or role
+        // (case-insensitive, partial match). Combined with locationFilter
+        // via a plain object spread so a search never escapes the caller's
+        // location scope.
+        const searchRegex = buildSearchRegex(req.query.search);
+        const filter = searchRegex
+            ? { ...locationFilter, $or: [{ username: searchRegex }, { fullname: searchRegex }, { role: searchRegex }] }
+            : locationFilter;
+
+        const totalUsers = await UserSchema.countDocuments(filter);
+
+        const users = await UserSchema.find(filter)
             .select('-password')
             .populate('createdBy', 'username fullname role')
             .populate('rootAdminId', 'username fullname role')
@@ -177,17 +188,19 @@ const getAllUsers = async (req, res) => {
             .skip(skip)
             .limit(limit);
 
-        if (!users.length) {
-            return res.status(404).json({ success: false, message: "No data found", data: [] });
-        }
-
-        const result = res.json({
+        // A page/search with no matches is a normal, valid result - not an
+        // error - so it always resolves as success:true with an empty
+        // array. (Previously this returned a 404 here, which made the
+        // frontend's query hook treat "no results" as a failed request and
+        // keep showing stale rows - most noticeable once search could
+        // legitimately return zero matches.)
+        return res.json({
             success: true,
             data: users,
             currentPage: page,
             totalPages: Math.ceil(totalUsers / limit),
             totalItems: totalUsers,
-            message: "Users fetched successfully",
+            message: users.length ? "Users fetched successfully" : "No users found",
         });
     } catch (error) {
         if (error instanceof LocationAccessError) {

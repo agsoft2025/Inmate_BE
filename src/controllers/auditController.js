@@ -1,6 +1,7 @@
 const AuditLog = require('../model/auditLogModel');
 const userModel = require('../model/userModel');
 const { requireLocationFilter } = require('../utils/locationAccess');
+const { buildSearchRegex } = require('../utils/searchUtils');
 
 const getAuditLogs = async (req, res) => {
   try {
@@ -13,7 +14,7 @@ const getAuditLogs = async (req, res) => {
       allowedUserIds = usersAtLocation.map((u) => u._id);
     }
 
-    const { userId, action, fromDate, toDate, page = 1, limit = 20 } = req.query;
+    const { userId, action, fromDate, toDate, page = 1, limit = 20, search } = req.query;
 
     const filter = {};
 
@@ -48,6 +49,23 @@ const getAuditLogs = async (req, res) => {
       } else {
         filter.userId = { $in: [] };
       }
+    }
+
+    // Smart Search: matches the actor's name, the action, the module
+    // (targetModel), the human-readable description, or a referenced
+    // inmate id inside `changes` - the same fields the "readable view"
+    // table renders. AuditLog stores its own denormalized `username`
+    // field (set at write time in utils/auditlogger.js), so this doesn't
+    // need a $lookup/populate to search by actor name.
+    const searchRegex = buildSearchRegex(search);
+    if (searchRegex) {
+      filter.$or = [
+        { username: searchRegex },
+        { action: searchRegex },
+        { targetModel: searchRegex },
+        { description: searchRegex },
+        { 'changes.inmateId': searchRegex },
+      ];
     }
 
     const totalLogs = await AuditLog.countDocuments(filter);

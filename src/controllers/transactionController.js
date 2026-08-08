@@ -2,6 +2,7 @@ const POSShoppingCart = require('../model/posShoppingCart');
 const Financial = require('../model/financialModel');
 const inmateModel = require('../model/inmateModel');
 const { buildLocationFilter, isSuperAdminRole } = require("../utils/locationAccess");
+const { buildSearchRegex } = require("../utils/searchUtils");
 
 const buildLocationContext = async (user) => {
   const isSuper = isSuperAdminRole(user?.role);
@@ -85,10 +86,39 @@ const applyReversedFilter = (transactions, reversedFlag) => {
   return transactions.filter((trx) => Boolean(trx.is_reversed) === reversedFlag);
 };
 
+// Smart Search (Transaction History): matches whatever the merged
+// POS/Financial transaction has already loaded at this point in the
+// request - inmate id, source, type/deposit-type/relationship/remarks
+// (Financial), work assignment name (Financial, populated), and product
+// name/category (POS, populated). Deliberately does NOT match POS's
+// `custodyType`, since that's only looked up for the current page's rows
+// *after* pagination (see enrichTransaction below) - searching it would
+// mean fetching every inmate's custody type up front for every request.
+const matchesTransactionSearch = (trx, regex) => {
+  const candidates = [
+    trx.inmateId,
+    trx.source,
+    trx.custodyType, // present on Financial rows directly; not on POS pre-enrichment
+    trx.type,
+    trx.depositType,
+    trx.relationShipId,
+    trx.remarks,
+    trx.transaction,
+    trx.status,
+    trx.is_reversed ? "reversed" : null,
+    trx.workAssignId?.name,
+    ...(Array.isArray(trx.products)
+      ? trx.products.flatMap((p) => [p?.productId?.itemName, p?.productId?.category])
+      : []),
+  ].filter((value) => value != null && value !== "");
+
+  return candidates.some((value) => regex.test(String(value)));
+};
+
 const getTransactionsByRange1 = async (req, res) => {
   try {
     const { range = 'daily', page = 1, limit = 10 } = req.query;
-    
+
 
     const now = new Date();
     let startDate;
@@ -282,7 +312,7 @@ const getTransactionsByRange2 = async (req, res) => {
 const getTransactionsByRange = async (req, res) => {
   try {
     console.log("<><>working..............")
-    const { range = "daily", page = 1, limit = 10,inmateId } = req.query;
+    const { range = "daily", page = 1, limit = 10, inmateId, search } = req.query;
     const now = new Date();
     let startDate;
     const context = await buildLocationContext(req.user);
@@ -394,6 +424,16 @@ const getTransactionsByRange = async (req, res) => {
         amount: t.wageAmount || t.depositAmount || 0
       }))
     ];
+
+    // 🔎 SMART SEARCH - applied before pagination so totalRecords/
+    // totalPages reflect the filtered count, not the full range. Totals
+    // above intentionally stay computed from the *unfiltered* range (they
+    // describe the whole selected date range, same as they already ignore
+    // pagination).
+    const searchRegex = buildSearchRegex(search);
+    if (searchRegex) {
+      allTransactions = allTransactions.filter((trx) => matchesTransactionSearch(trx, searchRegex));
+    }
 
     // ✅ SORT BY DATE DESC
     allTransactions.sort(
@@ -603,6 +643,4 @@ const getTransactionsByRangeMobile = async (req, res) => {
 
 
 
-
-
-module.exports = { getTransactionsByRange ,getTransactionsByRangeMobile};
+module.exports = { getTransactionsByRange, getTransactionsByRangeMobile };
