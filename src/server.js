@@ -35,6 +35,7 @@ const InmatePaymentMandateRoutes = require("./routes/InmatePaymentMandateRoutes"
 const inmatePaymentRoutes = require("./routes/inmatePaymentRoutes")
 const inmateFileUploadRoutes = require("./routes/inmateFileRoute")
 const adminRoutes = require("./routes/adminRoutes")
+const officerFeedbackRoutes = require("./routes/officerFeedbackRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
@@ -96,6 +97,7 @@ app.use("/location", authenticateToken, inmateLocationRoutes)
 // inventory and canteen operation
 app.use('/inventory',authenticateToken, attachLocationFilter, inventoryRoutes)
 app.use("/backup",authenticateToken,backupRoutes)
+app.use("/officer-feedback", authenticateToken, officerFeedbackRoutes)
 app.use("/mandate",InmatePaymentMandateRoutes)
 app.use("/payment",inmatePaymentRoutes)
 app.use("/file",inmateFileUploadRoutes)

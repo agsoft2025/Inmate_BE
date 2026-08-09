@@ -37,7 +37,14 @@ exports.login = async (req, res) => {
             const MATCH_THRESHOLD = 0.4;
 
             if (!bestMatch || minDistance > MATCH_THRESHOLD) {
-                return res.status(400).json({ message: "Face not recognized" });
+                // Face Verification Hardening: include the closest distance
+                // we found (when any candidate existed) so the frontend can
+                // show a more useful "why did this fail?" reason than a bare
+                // generic message.
+                return res.status(400).json({
+                    message: "Face not recognized",
+                    distance: bestMatch ? minDistance : null,
+                });
             }
 
             if (bestMatch.isDeleted) {

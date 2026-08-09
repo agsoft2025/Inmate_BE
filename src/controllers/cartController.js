@@ -11,6 +11,7 @@ const inmateModel = require("../model/inmateModel");
 const InmatePaymentMandate = require("../model/InmatePaymentMandate");
 const razorpay = require("../config/razorpay");
 const PaymentLog = require("../model/PaymentLog");
+const { computeRiskForBatch } = require("../utils/riskScoring");
 // const createPOSCart = async (req, res) => {
 //   const startTime = Date.now();
 //   try {
@@ -1174,9 +1175,27 @@ const getAllPOSCarts = async (req, res) => {
       .populate("products.productId")
       .sort({ createdAt: -1 });
 
+    // 🚩 Financial Anomaly & Fraud Detection - a lightweight risk badge on
+    // each Recent Purchases row (see the Reverse button in
+    // CanteenPosSystem.jsx). Scored against this same result set, so
+    // rapid-repeat detection only needs the purchases already being
+    // returned here - no extra query.
+    const riskRecords = carts.map(c => ({
+      id: c._id.toString(),
+      inmateId: c.inmateId,
+      amount: c.totalAmount,
+      eventDate: c.is_reversed ? (c.reversedAt || c.updatedAt || c.createdAt) : c.createdAt,
+      isReversed: Boolean(c.is_reversed)
+    }));
+    const riskMap = computeRiskForBatch(riskRecords);
+    const cartsWithRisk = carts.map(c => {
+      const plain = c.toObject ? c.toObject() : c;
+      return { ...plain, risk: riskMap.get(c._id.toString()) || { score: 0, level: "clear", signals: [] } };
+    });
+
     return res.status(200).json({
       success: true,
-      data: carts || [],
+      data: cartsWithRisk,
     });
   } catch (error) {
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });

@@ -3,6 +3,7 @@ const Financial = require('../model/financialModel');
 const inmateModel = require('../model/inmateModel');
 const { buildLocationFilter, isSuperAdminRole } = require("../utils/locationAccess");
 const { buildSearchRegex } = require("../utils/searchUtils");
+const { computeRiskForBatch } = require("../utils/riskScoring");
 
 const buildLocationContext = async (user) => {
   const isSuper = isSuperAdminRole(user?.role);
@@ -440,6 +441,20 @@ const getTransactionsByRange = async (req, res) => {
       (a, b) => new Date(b.eventDate || b.createdAt) - new Date(a.eventDate || a.createdAt)
     );
 
+    // 🚩 Financial Anomaly & Fraud Detection - score the FULL date-range
+    // result set (not just the current page) so rapid-repeat detection sees
+    // an inmate's other transactions even when they land on a different
+    // page. Only the risk for the paginated slice below is actually
+    // returned in the response.
+    const riskRecords = allTransactions.map(t => ({
+      id: t._id?.toString(),
+      inmateId: t.inmateId,
+      amount: t.amount,
+      eventDate: t.eventDate || t.createdAt,
+      isReversed: Boolean(t.is_reversed)
+    }));
+    const riskMap = computeRiskForBatch(riskRecords);
+
     // ✅ PAGINATION
     const paginated = allTransactions.slice(skip, skip + pageSize);
 
@@ -457,7 +472,8 @@ const getTransactionsByRange = async (req, res) => {
       return {
         ...trx,
         isReversed: Boolean(trx.is_reversed),
-        eventDate: trx.eventDate || trx.reversedAt || trx.updatedAt || trx.createdAt
+        eventDate: trx.eventDate || trx.reversedAt || trx.updatedAt || trx.createdAt,
+        risk: riskMap.get(trx._id?.toString()) || { score: 0, level: "clear", signals: [] }
       };
     };
 
@@ -643,4 +659,89 @@ const getTransactionsByRangeMobile = async (req, res) => {
 
 
 
-module.exports = { getTransactionsByRange, getTransactionsByRangeMobile };
+// 🚩 Financial Anomaly & Fraud Detection - a short list of the
+// highest-risk transactions from a recent lookback window, for the
+// Dashboard's "Flagged for Review" panel. Deliberately a separate,
+// self-contained function (rather than a refactor of getTransactionsByRange
+// into shared helpers) so this addition can't regress that function's
+// existing, more complex pagination/totals/custodyType behavior.
+const getFlaggedTransactions = async (req, res) => {
+  try {
+    const days = Math.min(parseInt(req.query.days, 10) || 7, 90);
+    const limit = Math.min(parseInt(req.query.limit, 10) || 5, 20);
+    const startDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+    const context = await buildLocationContext(req.user);
+    if (context.locationRestricted) {
+      return res.status(200).json({ success: true, days, flagged: [] });
+    }
+    const { locationObjectId, allowedInmateIds } = context;
+
+    const posQuery = {
+      createdAt: { $gte: startDate },
+      ...(locationObjectId ? { location_id: locationObjectId } : {})
+    };
+    const financialQuery = { createdAt: { $gte: startDate } };
+    if (allowedInmateIds) {
+      financialQuery.inmateId = { $in: Array.from(allowedInmateIds) };
+    }
+    if (locationObjectId) {
+      financialQuery.location_id = locationObjectId;
+    }
+
+    const [posTransactions, financialTransactions] = await Promise.all([
+      POSShoppingCart.find(posQuery).lean(),
+      Financial.find(financialQuery).lean()
+    ]);
+
+    const locationFilteredPOS = filterPOSTransactionsByLocation(posTransactions, context);
+    const filteredFinancial = filterFinancialTransactionsByLocation(financialTransactions, context);
+
+    const merged = [
+      ...locationFilteredPOS.map(t => ({
+        _id: t._id,
+        source: "POS",
+        inmateId: t.inmateId,
+        amount: t.totalAmount,
+        isReversed: Boolean(t.is_reversed),
+        eventDate: t.is_reversed ? (t.reversedAt || t.updatedAt || t.createdAt) : t.createdAt,
+        createdAt: t.createdAt
+      })),
+      ...filteredFinancial.map(t => ({
+        _id: t._id,
+        source: "FINANCIAL",
+        inmateId: t.inmateId,
+        amount: t.wageAmount || t.depositAmount || 0,
+        isReversed: false,
+        eventDate: t.createdAt,
+        createdAt: t.createdAt
+      }))
+    ];
+
+    const riskRecords = merged.map(t => ({
+      id: t._id.toString(),
+      inmateId: t.inmateId,
+      amount: t.amount,
+      eventDate: t.eventDate,
+      isReversed: t.isReversed
+    }));
+    const riskMap = computeRiskForBatch(riskRecords);
+
+    const flagged = merged
+      .map(t => ({ ...t, risk: riskMap.get(t._id.toString()) }))
+      .filter(t => t.risk && t.risk.score > 0)
+      .sort((a, b) => (b.risk.score - a.risk.score) || (new Date(b.eventDate) - new Date(a.eventDate)))
+      .slice(0, limit);
+
+    res.status(200).json({ success: true, days, flagged });
+  } catch (error) {
+    console.error("❌ getFlaggedTransactions error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Internal server error",
+      error: error.message
+    });
+  }
+};
+
+module.exports = { getTransactionsByRange, getTransactionsByRangeMobile, getFlaggedTransactions };

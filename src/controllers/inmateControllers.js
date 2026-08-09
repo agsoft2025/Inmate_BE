@@ -693,7 +693,10 @@ const fetchInmateDataUsingFace = async (req, res) => {
     }
     const MATCH_THRESHOLD = 0.4;
     if (!bestMatch || minDistance > MATCH_THRESHOLD) {
-      return res.status(400).json({ message: "Face not recognized" });
+      // Face Verification Hardening: include the closest distance we found
+      // (when any candidate existed) so the frontend can show a more useful
+      // "why did this fail?" reason than a bare generic message.
+      return res.status(400).json({ message: "Face not recognized", distance: bestMatch ? minDistance : null });
     }
     const locationFilter = getLocationFilterOrAbort(req, res);
     if (!locationFilter) return;
@@ -706,7 +709,7 @@ const fetchInmateDataUsingFace = async (req, res) => {
       return res.status(404).send({ success: false, message: "data fetch successfully" })
     }
 
-    return res.status(200).send({ success: true, data: userData, message: "data fetch successfully" })
+    return res.status(200).send({ success: true, data: userData, message: "data fetch successfully", distance: minDistance })
   } catch (error) {
     return res.status(500).send({ success: false, message: "internal server down", error: error.message })
   }
