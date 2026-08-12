@@ -111,9 +111,40 @@ const createUser = async (req, res) => {
     }
 };
 
+// Account-takeover fix: registering a face descriptor for a userId is a
+// privileged user-management action, exactly like createUser/updateUserById
+// (which already gate descriptor writes behind canManageUsers + the
+// caller's own facility). This endpoint previously accepted an arbitrary
+// userId with NO role or facility check at all, so ANY authenticated user
+// of ANY role could overwrite ANY other user's stored face - including a
+// SUPER ADMIN's - and then log in as them via face-only login. Confirmed
+// via Inmate_FE that this endpoint has no frontend caller in this repo, so
+// locking it down cannot break any existing UI flow.
 const faceRecongition = async (req, res) => {
     try {
         const { descriptor, userId } = req.body
+
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).send({ success: false, message: "valid user id is required" })
+        }
+        if (!descriptor) {
+            return res.status(400).send({ success: false, message: "descriptor could not find" })
+        }
+
+        const locationFilter = requireLocationFilter(req.user);
+        const targetUser = await UserSchema.findOne({ _id: userId, ...locationFilter });
+        if (!targetUser) {
+            return res.status(404).send({ success: false, message: "user not found" });
+        }
+        // Never let a non-SUPER-ADMIN caller write a SUPER ADMIN's face
+        // record, even if location scope happened to match.
+        if (isSuperAdminRole(targetUser.role) && !isSuperAdminRole(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         const isExistingFaceRecognition = await faceRecognitionService(descriptor)
         await userModel.findByIdAndUpdate(userId, { descriptor: descriptor }).then(data => {
             return res.status(200).send({ success: true, data: req.body.descriptor, message: "success continue" })
@@ -122,6 +153,9 @@ const faceRecongition = async (req, res) => {
         })
 
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({
             success: false,
             message: 'Internal server error',
@@ -130,16 +164,35 @@ const faceRecongition = async (req, res) => {
     }
 }
 
+// Same authorization gap as faceRecongition above - probing whether a
+// descriptor matches a specific userId is also a privileged action (it lets
+// a caller test a stolen/guessed descriptor against a specific target
+// account, including SUPER ADMIN, before attempting to use it elsewhere).
 const faceRecongitionMatch = async (req, res) => {
     try {
         const { userId, descriptor } = req.body
+
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(400).send({ success: false, message: "valid user id is required" })
+        }
+        if (!descriptor) return res.status(400).send({ success: false, message: "descriptor could not find" })
+
+        const locationFilter = requireLocationFilter(req.user);
+        const userData = await UserSchema.findOne({ _id: userId, ...locationFilter });
+        if (!userData) {
+            return res.status(404).send({ success: false, message: "user not found" });
+        }
+        if (isSuperAdminRole(userData.role) && !isSuperAdminRole(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         const checkFace = await faceRecognitionService(descriptor)
         if (checkFace.status) {
             return res.status(403).send({ sucess: false, message: "Face recognition record already exists" });
         }
-        if (!userId) return res.status(404).send({ success: false, message: "user id could not find" })
-        if (!descriptor) return res.status(404).send({ success: false, message: "descriptor could not find" })
-        const userData = await userModel.findById(userId)
         const distance = faceapi.euclideanDistance(userData.descriptor, descriptor);
         const THRESHOLD = 0.4;
         const faceMatch = distance < THRESHOLD;
@@ -150,7 +203,10 @@ const faceRecongitionMatch = async (req, res) => {
         }
 
     } catch (error) {
-        res.status(500).send({ success: false, message: "internal server down", error: error })
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
+        res.status(500).send({ success: false, message: "internal server down", error: error.message })
     }
 }
 
@@ -377,18 +433,43 @@ const deleteUser = async (req, res) => {
     }
 };
 
+// Same missing-authorization pattern as faceRecongition/faceRecongitionMatch
+// above - deleting is lower severity than overwriting (it can only disable
+// face login for the target, not redirect it to the attacker), but it's
+// still a privileged per-user mutation and gets the same checks for
+// consistency. This is the one of the three face-record endpoints that IS
+// used by the frontend (UserManagement's "delete face" button), via the
+// canManageUsers-gated UserManagement page - so an ADMIN/SUPER ADMIN
+// deleting a face record for a user in their own facility, the only
+// legitimate real-world usage, is unaffected by this fix.
 const deleteFaceRecognitionRecord = async (req, res) => {
     try {
         const { id } = req.params
-        if (!id) {
-            return res.status(404).send({ sucess: false, message: "could not find any id" })
+        if (!canManageUsers(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
         }
+        if (!id || !mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).send({ success: false, message: "valid user id is required" })
+        }
+
+        const locationFilter = requireLocationFilter(req.user);
+        const targetUser = await UserSchema.findOne({ _id: id, ...locationFilter });
+        if (!targetUser) {
+            return res.status(404).send({ success: false, message: "user not found" });
+        }
+        if (isSuperAdminRole(targetUser.role) && !isSuperAdminRole(req.user?.role)) {
+            return res.status(403).json({ success: false, message: "Access denied" });
+        }
+
         await UserSchema.findByIdAndUpdate(id, { descriptor: [] }).then((data) => {
             return res.status(200).send({ status: true, message: "face recogintion data deleted successfully" });
         }).catch((error) => {
             return res.status(500).send({ status: true, message: "internal server down",error:error.message });
         })
     } catch (error) {
+        if (error instanceof LocationAccessError) {
+            return res.status(error.status).json({ success: false, message: error.message });
+        }
         res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
     }
 }

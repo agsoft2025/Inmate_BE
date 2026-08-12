@@ -1,5 +1,6 @@
 const OfficerFeedback = require('../model/officerFeedbackModel');
 const logAudit = require('../utils/auditlogger');
+const { buildLocationFilter } = require('../utils/locationAccess');
 
 const VALID_STATUSES = ['confirmed', 'false_positive', 'investigate'];
 
@@ -76,7 +77,12 @@ const getOfficerFeedbackForTransaction = async (req, res) => {
       return res.status(400).json({ success: false, message: 'transactionId is required' });
     }
 
-    const feedback = await OfficerFeedback.find({ transactionId: String(transactionId) })
+    // This route has no attachLocationFilter/attachOptionalLocationFilter
+    // middleware ahead of it (see server.js), so the facility scope has to
+    // be resolved here directly rather than read off req.locationFilter.
+    const locationFilter = buildLocationFilter(req.user);
+
+    const feedback = await OfficerFeedback.find({ transactionId: String(transactionId), ...locationFilter })
       .sort({ createdAt: -1 })
       .lean();
 

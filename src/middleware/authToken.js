@@ -31,6 +31,7 @@ const authenticateToken = (req, res, next) => {
       role: userExist.role || user.role,
       location_id: userExist.location_id ? userExist.location_id.toString() : null,
       rootAdminId: userExist.rootAdminId ? userExist.rootAdminId.toString() : null,
+      inmateId: userExist.inmateId || null,
     };
     next();
   });

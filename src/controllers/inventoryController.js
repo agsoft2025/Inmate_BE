@@ -5,6 +5,7 @@ const CanteenInventory = require("../model/canteenInventory")
 const { getVendorPurchaseSummary } = require("../service/storeInventoryService")
 const { buildLocationFilter } = require("../utils/locationAccess");
 const mongoose = require("mongoose");
+const { logError } = require("../utils/safeLog");
 
 const requireLocationId = (req, res) => {
   const locationId = req.user?.location_id;
@@ -116,7 +117,7 @@ exports.addInventoryStock = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("INVENTORY ERROR:", error);
+    logError("INVENTORY ERROR:", error);
     return res.status(400).json({ success: false, message: error.message || "Inventory creation failed" });
   }
 };
@@ -423,7 +424,7 @@ exports.transferInventoryToCanteenInventory = async (req, res) => {
     let remaining = transferQty;
     const bulkOps = [];
     for (const doc of storeItems) {
-      console.log("<><>doc",doc)
+      // (removed debug full-document dump)
       if (remaining <= 0) break;
       if (doc.stock <= remaining) {
         bulkOps.push({ updateOne: { filter: { _id: doc._id }, update: { $set: { stock: 0 } } } });

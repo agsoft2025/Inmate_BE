@@ -4,6 +4,7 @@ const inmateModel = require('../model/inmateModel');
 const { buildLocationFilter, isSuperAdminRole } = require("../utils/locationAccess");
 const { buildSearchRegex } = require("../utils/searchUtils");
 const { computeRiskForBatch } = require("../utils/riskScoring");
+const { logError } = require("../utils/safeLog");
 
 const buildLocationContext = async (user) => {
   const isSuper = isSuperAdminRole(user?.role);
@@ -301,7 +302,7 @@ const getTransactionsByRange2 = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ getTransactionsByRange error:', error);
+    logError("getTransactionsByRange error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -498,7 +499,7 @@ const getTransactionsByRange = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ getTransactionsByRange error:", error);
+    logError("getTransactionsByRange error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -647,7 +648,7 @@ const getTransactionsByRangeMobile = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ getTransactionsByRange error:", error);
+    logError("getTransactionsByRange error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",
@@ -735,7 +736,7 @@ const getFlaggedTransactions = async (req, res) => {
 
     res.status(200).json({ success: true, days, flagged });
   } catch (error) {
-    console.error("❌ getFlaggedTransactions error:", error);
+    logError("getFlaggedTransactions error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",

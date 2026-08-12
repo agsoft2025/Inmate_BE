@@ -4,6 +4,7 @@ const inmateModel = require("../model/inmateModel");
 const posShoppingCart = require("../model/posShoppingCart");
 const tuckShopModel = require("../model/tuckShopModel");
 const mongoose = require("mongoose");
+const { logError } = require("./safeLog");
 
 // exports.checkTransactionLimit = async (inmateId, amount, type) => {
 //   try {
@@ -156,7 +157,7 @@ exports.checkTransactionLimit = async (inmateId, amount, type, locationId = null
     };
 
   } catch (error) {
-    console.log("checkTransactionLimit error:", error);
+    logError("checkTransactionLimit error:", error);
     return { status: false, message: "Internal server error" };
   }
 };
@@ -236,7 +237,7 @@ exports.checkProductsLimit = async (inmateId, newProducts = []) => {
 
     return { status: true, message: "Recharge purchase allowed" };
   } catch (error) {
-    console.error("checkProductsLimit error:", error);
+    logError("checkProductsLimit error:", error);
     return { status: false, message: "Internal server error" };
   }
 };

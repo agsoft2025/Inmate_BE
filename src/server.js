@@ -38,6 +38,9 @@ const adminRoutes = require("./routes/adminRoutes")
 const officerFeedbackRoutes = require("./routes/officerFeedbackRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
+const requireRole = require("./middleware/requireRole");
+const createRateLimiter = require("./middleware/rateLimit");
+const rateLimitConfig = require("./config/rateLimitConfig");
 
 const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutions.co.in"]
 
@@ -54,6 +57,35 @@ const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutio
 app.use(cors(allowedOrigins));
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
+
+// Lenient, app-wide safety net (per caller IP) ahead of every route below.
+// The stricter, endpoint-specific limiters further down (login, payment,
+// file upload, password change) layer on top of this one for the routes
+// that need tighter bounds - see config/rateLimitConfig.js for every
+// tier's window/ceiling and how to override them via environment
+// variables.
+const globalRateLimiter = createRateLimiter({
+    ...rateLimitConfig.global,
+    keyPrefix: "global",
+    message: "Too many requests. Please try again later.",
+});
+// /payment/* (Razorpay order create/verify) and /mandate/* (auto-debit
+// mandate setup) - both authenticated, so keyed by the caller's own user
+// id rather than IP (multiple staff can legitimately share one facility's
+// network/IP).
+const paymentRateLimiter = createRateLimiter({
+    ...rateLimitConfig.payment,
+    keyPrefix: "payment",
+    keyGenerator: (req) => req.user?.id || req.ip,
+    message: "Too many payment requests. Please try again later.",
+});
+// POST /file (inmate file/photo upload) - authenticated, keyed the same way.
+const uploadRateLimiter = createRateLimiter({
+    ...rateLimitConfig.upload,
+    keyPrefix: "upload",
+    keyGenerator: (req) => req.user?.id || req.ip,
+    message: "Too many upload requests. Please try again later.",
+});
 
 app.get('/', (req, res) => {
     res.type('html').send(`<!DOCTYPE html>
@@ -79,28 +111,34 @@ app.get('/', (req, res) => {
 </html>`);
 });
 
+app.use(globalRateLimiter);
+
 app.use("/user", authRoutes);
 app.use("/admin", adminRoutes);
+// Role gating for /inmate, /tuck-shop, and /location is applied per-route
+// inside their own route files (some of their routes are staff-only, others
+// are shared with POS or with the record's own INMATE user) - see
+// routes/inmateRoutes.js, routes/tuckShopRoutes.js, routes/inmateLocationRoutes.js.
 app.use("/inmate", authenticateToken, attachLocationFilter, inmateRoutes);
-app.use("/financial", authenticateToken, attachLocationFilter, financialRoutes);
+app.use("/financial", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, financialRoutes);
 app.use("/tuck-shop", authenticateToken, attachLocationFilter, tuckShopRoutes);
-app.use("/pos-shop-cart", authenticateToken, attachOptionalLocationFilter, cartRoutes);
+app.use("/pos-shop-cart", authenticateToken, requireRole("ADMIN", "SUPER ADMIN", "POS"), attachOptionalLocationFilter, cartRoutes);
 app.use("/users", userRoutes);
 app.use("/faceRecognition",userRoutes)
-app.use("/transactions", authenticateToken, attachLocationFilter, transactionRoutes);
-app.use("/dashboard", authenticateToken, attachLocationFilter, dashboardRoutes);
-app.use("/reports", authenticateToken, attachLocationFilter, reportRoutes);
-app.use("/logs", authenticateToken, attachLocationFilter, auditLogsRoutes);
-app.use("/bulk-oprations", authenticateToken, attachLocationFilter, bulkOperations);
-app.use("/department", authenticateToken, departmentRoles);
+app.use("/transactions", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, transactionRoutes);
+app.use("/dashboard", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, dashboardRoutes);
+app.use("/reports", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, reportRoutes);
+app.use("/logs", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, auditLogsRoutes);
+app.use("/bulk-oprations", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, bulkOperations);
+app.use("/department", authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), departmentRoles);
 app.use("/location", authenticateToken, inmateLocationRoutes)
 // inventory and canteen operation
-app.use('/inventory',authenticateToken, attachLocationFilter, inventoryRoutes)
-app.use("/backup",authenticateToken,backupRoutes)
-app.use("/officer-feedback", authenticateToken, officerFeedbackRoutes)
-app.use("/mandate",InmatePaymentMandateRoutes)
-app.use("/payment",inmatePaymentRoutes)
-app.use("/file",inmateFileUploadRoutes)
+app.use('/inventory',authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), attachLocationFilter, inventoryRoutes)
+app.use("/backup",authenticateToken, requireRole("ADMIN", "SUPER ADMIN"), backupRoutes)
+app.use("/officer-feedback", authenticateToken, requireRole("ADMIN", "SUPER ADMIN", "POS"), officerFeedbackRoutes)
+app.use("/mandate", authenticateToken, paymentRateLimiter, InmatePaymentMandateRoutes)
+app.use("/payment", authenticateToken, paymentRateLimiter, inmatePaymentRoutes)
+app.use("/file", authenticateToken, uploadRateLimiter, attachLocationFilter, inmateFileUploadRoutes)
 
 
 app.listen(process.env.PORT,hostname, () => {

@@ -8,6 +8,7 @@ const mongoose = require("mongoose");
 const { checkTransactionLimit } = require('../utils/inmateTransactionLimiter');
 const InmateSchema = require("../model/inmateModel");
 const userModel = require('../model/userModel');
+const { logError } = require('../utils/safeLog');
 const bcrypt = require('bcrypt');
 const InmateLocation = require('../model/inmateLocationModel');
 const { resolveLocationId, LocationAccessError } = require('../utils/locationAccess');
@@ -326,7 +327,7 @@ const bulkUpsertInmates = async (req, res) => {
     });
 
   } catch (error) {
-    console.log("Error in bulkUpsertInmates:", error);
+    logError("Error in bulkUpsertInmates:", error);
     if (session) await session.abortTransaction();
     if (error instanceof LocationAccessError) {
       return res.status(error.status).json({ success: false, message: error.message });

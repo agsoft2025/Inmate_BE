@@ -8,6 +8,7 @@ const { Parser } = require('json2csv');
 const formatDateToYYYYMMDD = require("../utils/dateFormat");
 const financialModel = require("../model/financialModel");
 const userModel = require("../model/userModel");
+const { logError } = require("../utils/safeLog");
 const InmateLocation = require("../model/inmateLocationModel");
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 const { normalizeIndianMobile, isValidIndianMobile } = require("../utils/phoneUtils");
@@ -26,7 +27,7 @@ const normalizeStatus = (status = "") => {
   return STATUS_MAP[normalized] || "Active";
 };
 const POSShoppingCart = require('../model/posShoppingCart');
-const { faceRecognitionService, faceRecognitionExcludeUserService } = require("../service/faceRecognitionService");
+const { faceRecognitionService, faceRecognitionExcludeUserService, resolveFaceMatch } = require("../service/faceRecognitionService");
 const normalizePhoneNumber = (value) => {
   if (!value) return value;
   return String(value)
@@ -228,7 +229,7 @@ const createInmate = async (req, res) => {
     if (error instanceof LocationAccessError) {
       return res.status(error.status).json({ success: false, message: error.message });
     }
-    console.log("<><>error",error);
+    logError("createInmate error:", error);
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
 };
@@ -277,7 +278,7 @@ const getInmates = async (req, res) => {
       message: 'Inmates fetched successfully'
     });
   } catch (error) {
-    console.error('getInmates error:', error);
+    logError("getInmates error:", error);
     res.status(500).json({
       success: false,
       message: 'Internal server error',
@@ -406,7 +407,7 @@ const updateInmate = async (req, res) => {
     if (error instanceof LocationAccessError) {
       return res.status(error.status).json({ success: false, message: error.message });
     }
-    console.log("<><>error", error);
+    logError("updateInmate error:", error);
 
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
@@ -671,32 +672,24 @@ const fetchInmateDataUsingFace = async (req, res) => {
       return res.status(404).send({ success: false, message: "could not find face" })
     }
     const allUsers = await userModel.find({}, { descriptor: 1, username: 1, role: 1, fullname: 1 })
-    function euclideanDistance(desc1, desc2) {
-      let sum = 0;
-      for (let i = 0; i < desc1.length; i++) {
-        let diff = desc1[i] - desc2[i];
-        sum += diff * diff;
-      }
-      return Math.sqrt(sum);
-    }
-    let bestMatch = null;
-    let minDistance = Infinity;
 
-    for (const user of allUsers) {
-      if (!user.descriptor || user.descriptor.length !== descriptor.length) continue;
+    // Account-takeover fix: use the same ambiguity-aware resolver as
+    // login - if a second enrolled user is also close enough to plausibly
+    // be the presented face, refuse to guess (misidentifying an inmate at
+    // the POS terminal has real financial impact - wrong wallet debited).
+    const { matched, ambiguous, bestMatch, distance } = resolveFaceMatch(descriptor, allUsers);
 
-      const dist = euclideanDistance(user.descriptor, descriptor);
-      if (dist < minDistance) {
-        minDistance = dist;
-        bestMatch = user;
-      }
+    if (ambiguous) {
+      return res.status(400).json({
+        message: "Face match is ambiguous. Please search for the inmate manually.",
+        distance,
+      });
     }
-    const MATCH_THRESHOLD = 0.4;
-    if (!bestMatch || minDistance > MATCH_THRESHOLD) {
+    if (!matched) {
       // Face Verification Hardening: include the closest distance we found
       // (when any candidate existed) so the frontend can show a more useful
       // "why did this fail?" reason than a bare generic message.
-      return res.status(400).json({ message: "Face not recognized", distance: bestMatch ? minDistance : null });
+      return res.status(400).json({ message: "Face not recognized", distance: bestMatch ? distance : null });
     }
     const locationFilter = getLocationFilterOrAbort(req, res);
     if (!locationFilter) return;
@@ -709,7 +702,7 @@ const fetchInmateDataUsingFace = async (req, res) => {
       return res.status(404).send({ success: false, message: "data fetch successfully" })
     }
 
-    return res.status(200).send({ success: true, data: userData, message: "data fetch successfully", distance: minDistance })
+    return res.status(200).send({ success: true, data: userData, message: "data fetch successfully", distance })
   } catch (error) {
     return res.status(500).send({ success: false, message: "internal server down", error: error.message })
   }

@@ -6,17 +6,17 @@ const InmateLocation = require("../model/inmateLocationModel");
 const axios = require("axios")
 const crypto = require("crypto");
 const userModel = require("../model/userModel");
-const { log } = require("console");
+const { logError, pick } = require("../utils/safeLog");
 
 exports.inmateCreatePayment = async (req, res) => {
   try {
-    console.log("<><>req.bod");
     const { inmateId, amount } = req.body;
 
     const inmate = await inmateModel.findOne({ inmateId:inmateId });
-    console.log("inmate",inmate)
+    // Force-selects razorpay.keySecret/webhookSecret (select:false by
+    // default on the model) because createOrder() below needs them to call
+    // the Razorpay SDK - never log `razorpayConfig`/`locationData.razorpay`.
     const locationData = await InmateLocation.findById(inmate.location_id).select("+razorpay.keySecret");
-    console.log("locationData",locationData.razorpay)
     const razorpayConfig = locationData.razorpay
     if(!razorpayConfig || !razorpayConfig.isActive){
       return res.status(400).json({ success: false, message: "Payment gateway not configured for this location" });
@@ -43,7 +43,7 @@ exports.inmateCreatePayment = async (req, res) => {
       transactionId: transaction._id
     });
   } catch (error) {
-    console.error(error);
+    logError("inmateCreatePayment error:", error);
     res.status(500).json({ success: false, message: "Order creation failed" });
   }
 };
@@ -185,7 +185,7 @@ exports.inmateVerifyPayment = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Verify error:", error);
+    logError("Verify error:", error);
     res.status(500).json({
       success: false,
       message: "Payment verification failed"
@@ -213,9 +213,9 @@ exports.createOrder = async (req, res) => {
       inmate_info:inmateData,
       month:Number(month)
     }
-    log("payload",payload)
+    console.log("createOrder: sending global payment request", pick(payload, ["amount", "shortReceipt", "subscription_type", "month"]));
      orderData = await axios.post(`${process.env.GLOBAL_URL}/api/payment/create`, payload)
-     orderData = orderData.data     
+     orderData = orderData.data
     if(orderData?.subscription){
       return res.status(200).send({status:true,message:orderData.message})
     }
@@ -229,7 +229,7 @@ exports.createOrder = async (req, res) => {
     // await transaction.save();
     res.status(200).json({ success: true, order, message:orderData?.data?.message || "default message" });
   } catch (error) {
-    console.error(error);
+    logError("createOrder error:", error);
     res.status(500).json({ success: false, message: 'Order creation failed' });
   }
 };
@@ -238,7 +238,7 @@ exports.createOrder = async (req, res) => {
 exports.verifyPayment = async (req, res) => {
   try {
     const { razorpay_order_id, razorpay_payment_id, razorpay_signature, inmateId,month } = req.body;
-    console.log("<><>req.body",req.body);
+    console.log("verifyPayment: request received", pick(req.body, ["inmateId", "month", "razorpay_order_id", "razorpay_payment_id"]));
      if (![1, 3, 6, 12].includes(Number(month))) {
       return res.status(400).json({
         success: false,
@@ -263,7 +263,7 @@ exports.verifyPayment = async (req, res) => {
 
     res.json({ success: true, message: "Payment Subscription is updated" });
   } catch (error) {
-    console.error(error);
+    logError("verifyPayment error:", error);
     res.status(500).json({ success: false, message: 'Payment verification failed' });
   }
 };

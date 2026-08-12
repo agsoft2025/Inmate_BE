@@ -5,6 +5,7 @@ const PaymentLog = require("../model/PaymentLog");
 const { createMandate } = require("../utils/emandate");
 const axios = require("axios");
 const https = require("https");
+const { logError } = require("../utils/safeLog");
 
 const createInmateMandate1 = async (req, res) => {
     try {
@@ -60,7 +61,7 @@ const createInmateMandate1 = async (req, res) => {
             approvalUrl: mandate.short_url
         });
     } catch (err) {
-        console.error(err);
+        logError("createInmateMandate1 error:", err);
         res.status(500).json({ success: false, message: err.message });
     }
 };
@@ -114,7 +115,7 @@ const createInmateMandate2 = async (req, res) => {
         });
 
     } catch (err) {
-        console.error("Error:", err?.response?.data || err);
+        logError("createInmateMandate1 error:", err);
         res.status(500).json({
             success: false,
             message: err?.response?.data?.error?.description || err.message
@@ -183,7 +184,7 @@ const createInmateMandate3 = async (req, res) => {
 
             // Note: Plan amount (₹100) will be used as refundable token for mandate authentication
         } catch (planError) {
-            console.error('Error fetching plan:', planError);
+            logError("Error fetching plan:", planError);
             return res.status(500).json({
                 success: false,
                 message: 'Invalid or inaccessible plan ID: ' + (planError.error?.description || planError.message),
@@ -212,7 +213,7 @@ const createInmateMandate3 = async (req, res) => {
             authenticationNote: `₹${plan.item.amount / 100} token charge (refunded after approval)`,
         });
     } catch (error) {
-        console.error('Error creating mandate:', error);
+        logError("Error creating mandate:", error);
         return res.status(error.statusCode || 500).json({
             success: false,
             message: error.error?.description || error.message || 'Failed to create mandate',
@@ -282,7 +283,7 @@ const createInmateMandate = async (req, res) => {
                 });
             }
         } catch (planError) {
-            console.error('Error fetching plan:', planError);
+            logError("Error fetching plan:", planError);
             return res.status(500).json({
                 success: false,
                 message: 'Invalid or inaccessible plan ID: ' + (planError.error?.description || planError.message),
@@ -319,7 +320,7 @@ const createInmateMandate = async (req, res) => {
             authenticationNote: `₹${plan.item.amount / 100} token charge (refunded after approval)`,
         });
     } catch (error) {
-        console.error('Error creating mandate:', error);
+        logError("Error creating mandate:", error);
         return res.status(error.statusCode || 500).json({
             success: false,
             message: error.error?.description || error.message || 'Failed to create mandate',
@@ -361,7 +362,7 @@ const saveMandate = async (req, res) => {
       mandateId: subscriptionId,
     });
   } catch (error) {
-    console.error('Error saving mandate:', error);
+    logError("Error saving mandate:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };

@@ -12,6 +12,22 @@ const inmateFileSchema = new mongoose.Schema(
     },
     remarks: {
       type: String
+    },
+    inmateId: {
+      type: String,
+      required: true,
+      trim: true,
+      index: true
+    },
+    location_id: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "InmateLocation",
+      required: true,
+      index: true
+    },
+    uploadedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User"
     }
   },
   { timestamps: true }

@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { logError } = require("./safeLog");
 
 async function createMandate(customerId, maxAmount, inmateId) {
   try {
@@ -20,7 +21,7 @@ async function createMandate(customerId, maxAmount, inmateId) {
 
     return response.data; // ✅ should contain id, short_url, etc.
   } catch (error) {
-    console.error("<><>createMandate error", error.response?.data || error.message);
+    logError("createMandate error:", error);
     throw new Error(error.response?.data?.error?.description || error.message);
   }
 }

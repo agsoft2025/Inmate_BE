@@ -1,10 +1,9 @@
 const { default: axios } = require("axios");
 const InmateLocation = require("../model/inmateLocationModel");
+const { pick } = require("../utils/safeLog");
 
 const syncLocationToGlobal = async (locationId) => {
   try {
-    console.log("<><>global server");
-    
     const location = await InmateLocation.findById(locationId);
     if (!location) return;
 
@@ -16,14 +15,13 @@ const syncLocationToGlobal = async (locationId) => {
     };
 
     const url = `${process.env.GLOBAL_URL}/api/location`
-    console.log("<><>url",url)
     const res = await axios.post(
       `${url}`,
       payload,
       { timeout: 5000 }
     );
-    console.log("<><>res",res.data);
-    
+    console.log("syncLocationToGlobal: synced", pick(res.data, ["_id"]));
+
 
     await InmateLocation.updateOne(
       { _id: locationId },

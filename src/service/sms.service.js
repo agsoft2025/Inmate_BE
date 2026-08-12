@@ -1,4 +1,5 @@
 const axios = require("axios");
+const { logError } = require("../utils/safeLog");
 exports.sendWhatsAppOTP = async (phone, otp,name) => {
   try {
     const url = `https://graph.facebook.com/v22.0/${process.env.PHONE_NUMBER_ID}/messages`;
@@ -39,7 +40,7 @@ exports.sendWhatsAppOTP = async (phone, otp,name) => {
     return { success: true };
 
   } catch (error) {
-    console.error("WhatsApp error:", error.response?.data || error.message);
+    logError("WhatsApp error:", error);
     return { success: false };
   }
 };

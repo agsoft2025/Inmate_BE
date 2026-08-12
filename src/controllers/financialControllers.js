@@ -7,11 +7,30 @@ const { checkTransactionLimit } = require("../utils/inmateTransactionLimiter");
 const inmateModel = require("../model/inmateModel");
 const departmentModel = require("../model/departmentModel");
 const InmateFile = require("../model/InmateFile");
-const { requireLocationFilter } = require("../utils/locationAccess");
+const { requireLocationFilter, LocationAccessError } = require("../utils/locationAccess");
+const { logError, pick } = require("../utils/safeLog");
+
+// Mirrors the helper already used in inmateControllers.js / inmateFileController.js
+// so every handler in this file resolves the caller's facility scope the same way,
+// returning null (after already sending the error response) if it can't.
+const getLocationFilterOrAbort = (req, res) => {
+  try {
+    return req.locationFilter ?? requireLocationFilter(req.user);
+  } catch (error) {
+    if (error instanceof LocationAccessError) {
+      res.status(error.status).json({ success: false, message: error.message });
+      return null;
+    }
+    throw error;
+  }
+};
 
 const downloadWagesCSV = async (req, res) => {
   try {
-    const inmateData = await inmateModel.find()
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
+    const inmateData = await inmateModel.find({ ...locationFilter })
     const departmentsData = await departmentModel.find()
     if (!departmentsData.length) {
       return res.status(404).json({ message: 'No departments found. Please create at least one department.' });
@@ -122,7 +141,7 @@ const downloadWagesCSV = async (req, res) => {
 // };
 const createFinancial = async (req, res) => {
   try {
-    console.log("<><>req.body", req.body);
+    console.log("createFinancial: request received", pick(req.body, ["inmateId", "type", "depositType", "status"]));
     const { inmateId, workAssignId, hoursWorked, wageAmount, transaction,
       depositType, status, relationShipId, type, depositAmount, remarks, fileIds = [] } = req.body;
     if (fileIds.length > 0) {
@@ -225,14 +244,17 @@ const createFinancial = async (req, res) => {
 
     res.status(201).json({ success: true, data: savedFinancial, message: "Financial " + type + " successfully created" });
   } catch (error) {
-    console.log("<><>error",error)
+    logError("createFinancial error:", error);
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
 };
 
 const getFinancial = async (req, res) => {
   try {
-    const inmates = await FinancialSchema.find().sort({ createdAt: -1 });
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
+    const inmates = await FinancialSchema.find({ ...locationFilter }).sort({ createdAt: -1 });
     if (!inmates) {
       return res.status(404).json({ success: false, message: "No data found", data: [] })
     }
@@ -251,7 +273,11 @@ const getFinancialID = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
-    const findFinancial = await FinancialSchema.findById(id);
+
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
+    const findFinancial = await FinancialSchema.findOne({ _id: id, ...locationFilter });
     if (!findFinancial) {
       return res.status(404).json({ message: "No data found" });
     }
@@ -264,7 +290,9 @@ const getFinancialID = async (req, res) => {
 const updateFinancial = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateBody = req.body;
+    // location_id is derived from the record's own facility, never
+    // client-settable.
+    const { location_id, ...updateBody } = req.body;
 
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
@@ -273,11 +301,14 @@ const updateFinancial = async (req, res) => {
       return res.status(400).json({ message: "Invalid ID format" });
     }
 
-    const original = await FinancialSchema.findById(id);
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
+    const original = await FinancialSchema.findOne({ _id: id, ...locationFilter });
     if (!original) return res.status(404).json({ message: "No data found" });
 
-    const updatedFinancial = await FinancialSchema.findByIdAndUpdate(
-      id,
+    const updatedFinancial = await FinancialSchema.findOneAndUpdate(
+      { _id: id, ...locationFilter },
       updateBody,
       { new: true, runValidators: true }
     );
@@ -286,7 +317,7 @@ const updateFinancial = async (req, res) => {
     }
 
     if (original.type === 'wages' || original.type === 'deposit') {
-      const inmate = await InmateSchema.findOne({ inmateId: original.inmateId });
+      const inmate = await InmateSchema.findOne({ inmateId: original.inmateId, location_id: original.location_id });
       if (inmate) {
         let oldAmount = original.type === 'wages' ? original.wageAmount : original.depositAmount;
         let newAmount = updateBody.wageAmount || updateBody.depositAmount || 0;
@@ -320,7 +351,11 @@ const deleteFinancial = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
-    const updatedFinancial = await FinancialSchema.findByIdAndDelete(id);
+
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
+    const updatedFinancial = await FinancialSchema.findOneAndDelete({ _id: id, ...locationFilter });
     if (!updatedFinancial) {
       return res.status(404).json({ message: "No data found" });
     }
@@ -351,7 +386,11 @@ const searchFinancial = async (req, res) => {
 
     const regex = new RegExp(query, "i"); // 'i' makes it case-insensitive
 
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+
     const results = await FinancialSchema.find({
+      ...locationFilter,
       $or: [
         { inmateId: regex },
         { firstName: regex },

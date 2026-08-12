@@ -3,6 +3,7 @@ const InmateLocation = require("../model/inmateLocationModel");
 const userModel = require("../model/userModel");
 const axios = require("axios");
 const { syncLocationToGlobal } = require("../service/globaleServer");
+const { logError } = require("../utils/safeLog");
 
 exports.addLocation = async (req, res) => {
   try {
@@ -17,7 +18,6 @@ exports.addLocation = async (req, res) => {
 
     // 🔒 Ensure admin doesn't already have a location
     const existingUser = await userModel.findById(req.user.id);
-console.log("Existing user data:", existingUser);
     if (existingUser.location_id) {
       return res.status(400).json({
         success: false,
@@ -55,7 +55,7 @@ console.log("Existing user data:", existingUser);
     });
 
   } catch (err) {
-    console.log(err);
+    logError("addLocation error:", err);
     return res.status(500).json({
       success: false,
       message: err.message
@@ -142,7 +142,7 @@ exports.updateLocation = async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    logError("updateLocation error:", error);
     return res.status(500).json({
       success: false,
       message: error.message
@@ -169,7 +169,36 @@ exports.deleteLocation = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const deletedLocation = await InmateLocation.findByIdAndDelete(id);
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid location ID format",
+      });
+    }
+
+    // 🔒 STRICT CHECK - same ownership rule as updateLocation: an admin may
+    // only ever delete the single location they created and are assigned
+    // to, never an arbitrary :id supplied by the client.
+    const adminUser = await userModel.findById(req.user.id);
+
+    if (!adminUser || !adminUser.location_id) {
+      return res.status(404).json({
+        success: false,
+        message: "Admin or location not found"
+      });
+    }
+
+    if (String(adminUser.location_id) !== String(id)) {
+      return res.status(403).json({
+        success: false,
+        message: "Unauthorized access"
+      });
+    }
+
+    const deletedLocation = await InmateLocation.findOneAndDelete({
+      _id: adminUser.location_id,
+      createdBy: req.user.id
+    });
 
     if (!deletedLocation) {
       return res.status(404).json({
@@ -183,7 +212,7 @@ exports.deleteLocation = async (req, res) => {
       message: "Location deleted successfully.",
     });
   } catch (error) {
-    console.error("Delete Location Error:", error);
+    logError("Delete Location Error:", error);
     return res.status(500).json({
       success: false,
       message: "Internal server error.",

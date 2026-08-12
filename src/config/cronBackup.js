@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { MongoClient } = require('mongodb');
 const backupLocationModel = require('../model/backupLocationModel');
+const { getMongoConnectionOptions, redactMongoUri } = require('./mongoSecurity');
 
 let currentJob = null; // store reference to currently scheduled cron job
 
@@ -30,8 +31,9 @@ async function backupDatabase() {
     const backupFolder = path.join(backupBaseDir, `backup-${timestamp}`);
     fs.mkdirSync(backupFolder, { recursive: true });
 
-    // 4️⃣ Connect to MongoDB
-    const client = new MongoClient(process.env.DB_MONGO_URL);
+    // 4️⃣ Connect to MongoDB (same auth/TLS options as the main app connection -
+    // see config/mongoSecurity.js / docs/mongodb_security_migration.md)
+    const client = new MongoClient(process.env.DB_MONGO_URL, getMongoConnectionOptions());
     await client.connect();
     const db = client.db();
 
@@ -47,7 +49,9 @@ async function backupDatabase() {
     console.log(`🎉 Backup completed successfully: ${backupFolder}`);
     await client.close();
   } catch (err) {
-    console.error('❌ Backup failed:', err.message);
+    // redactMongoUri strips any embedded credentials in case the driver
+    // ever includes the connection string in an error message.
+    console.error('❌ Backup failed:', redactMongoUri(err.message));
   }
 }
 

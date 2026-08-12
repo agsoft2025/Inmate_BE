@@ -12,6 +12,7 @@ const InmatePaymentMandate = require("../model/InmatePaymentMandate");
 const razorpay = require("../config/razorpay");
 const PaymentLog = require("../model/PaymentLog");
 const { computeRiskForBatch } = require("../utils/riskScoring");
+const { logError, pick } = require("../utils/safeLog");
 // const createPOSCart = async (req, res) => {
 //   const startTime = Date.now();
 //   try {
@@ -293,7 +294,29 @@ const { computeRiskForBatch } = require("../utils/riskScoring");
 
 const createPOSCart = async (req, res) => {
   try {
-    const { inmateId, totalAmount, products } = req.body;
+    const { inmateId, totalAmount: clientTotalAmount, products } = req.body;
+
+    // ---- Basic request-shape validation, before any DB/limit calls ----
+    if (!inmateId || clientTotalAmount === undefined || !Array.isArray(products) || products.length === 0) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    for (const item of products) {
+      if (!item.productId || !mongoose.Types.ObjectId.isValid(item.productId)) {
+        return res.status(400).json({ success: false, message: "Each product must have a valid productId" });
+      }
+      const quantity = Number(item.quantity);
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        return res.status(400).json({ success: false, message: "Each product quantity must be a positive whole number" });
+      }
+      item.quantity = quantity;
+    }
+
+    const clientAmountNumber = Number(clientTotalAmount);
+    if (!Number.isFinite(clientAmountNumber) || clientAmountNumber < 0) {
+      return res.status(400).json({ success: false, message: "totalAmount must be a valid non-negative number" });
+    }
+
     const userData = await userModel.findById(req.user.id).populate("location_id");
     const userLocation = userData.location_id;
     if (!userLocation) {
@@ -303,7 +326,56 @@ const createPOSCart = async (req, res) => {
       return res.status(403).send({ success: false, message: "Our application is undergoing maintenance. Please try again in a little while" });
     }
     const locationObjectId = userLocation._id || userLocation;
-    const depositLim = await checkTransactionLimit(inmateId, totalAmount, type = "spend");
+
+    // Check inmate existence - scoped to the caller's own facility so a
+    // request cannot target an inmate belonging to a different facility.
+    const existingInmate = await Inmate.findOne({ inmateId, location_id: locationObjectId });
+    if (!existingInmate) {
+      return res.status(400).json({ success: false, message: "Inmate ID does not exist" });
+    }
+    const paymentMandate = await InmatePaymentMandate.findOne({ inmateId: existingInmate.inmateId }).sort({ createdAt: -1 });
+    // if (!paymentMandate?.mandateId || !paymentMandate.customerId) {
+    //   return res.status(400).json({ success: false, message: "No active mandate found! Setup auto-pay first." });
+    // }
+
+    // Check product availability/stock and compute the authoritative total
+    // server-side from the DB price - the client-supplied totalAmount is
+    // never trusted for this calculation. Products are looked up scoped to
+    // the caller's own facility, so a request cannot buy/deplete another
+    // facility's tuck-shop inventory.
+    let computedTotal = 0;
+    const validatedItems = [];
+    for (const item of products) {
+      const tuckItem = await TuckShop.findOne({ _id: item.productId, location_id: locationObjectId });
+      if (!tuckItem) {
+        return res.status(404).json({ message: `Product with ID ${item.productId} not found` });
+      }
+      if (tuckItem.status !== "Active") {
+        return res.status(400).json({ success: false, message: `"${tuckItem.itemName}" is not currently available` });
+      }
+      if (tuckItem.stockQuantity < item.quantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for item "${tuckItem.itemName}". Available: ${tuckItem.stockQuantity}, Requested: ${item.quantity}`
+        });
+      }
+      computedTotal += tuckItem.price * item.quantity;
+      validatedItems.push({ tuckItem, quantity: item.quantity });
+    }
+    computedTotal = Math.round(computedTotal * 100) / 100;
+
+    // Never trust the client-provided total - reject on any mismatch
+    // against the server-calculated total instead of silently correcting it.
+    if (Math.abs(computedTotal - clientAmountNumber) > 0.01) {
+      return res.status(400).json({
+        success: false,
+        message: "Provided total amount does not match the calculated price. Purchase rejected."
+      });
+    }
+
+    // Spend-limit / recharge-limit checks use the SERVER-calculated total,
+    // not the client-supplied one.
+    const depositLim = await checkTransactionLimit(inmateId, computedTotal, "spend", locationObjectId);
     if (!depositLim.status) {
       return res.status(400).send({ success: false, message: depositLim.message });
     }
@@ -312,65 +384,29 @@ const createPOSCart = async (req, res) => {
       return res.status(400).send({ success: false, message: checkRechargeTransactionLim.message });
     }
 
-    if (!inmateId || totalAmount === undefined || !Array.isArray(products) || products.length === 0) {
-      return res.status(400).json({ message: "Missing required fields" });
-    }
-
-    for (const item of products) {
-      if (!item.productId || !item.quantity) {
-        return res.status(400).json({ message: "Each product must have productId and quantity" });
-      }
-    }
-
-    // Check inmate existence
-    const existingInmate = await Inmate.findOne({ inmateId });
-    const paymentMandate = await InmatePaymentMandate.findOne({ inmateId: existingInmate.inmateId }).sort({ createdAt: -1 });
-    
-    // if (!paymentMandate?.mandateId || !paymentMandate.customerId) {
-    //   return res.status(400).json({ success: false, message: "No active mandate found! Setup auto-pay first." });
-    // }
-    if (!existingInmate) {
-      return res.status(400).json({ success: false, message: "Inmate ID does not exist" });
-    }
-
-    // Check sufficient balance
-    if (existingInmate.balance < totalAmount) {
+    // Check sufficient balance against the server-calculated total
+    if (existingInmate.balance < computedTotal) {
       return res.status(400).json({ success: false, message: "Insufficient balance" });
     }
 
-    // Check stock availability
-    for (const item of products) {
-      const tuckItem = await TuckShop.findById(item.productId);
-      if (!tuckItem) {
-        return res.status(404).json({ message: `Product with ID ${item.productId} not found` });
-      }
-
-      if (tuckItem.stockQuantity < item.quantity) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient stock for item "${tuckItem.itemName}". Available: ${tuckItem.stockQuantity}, Requested: ${item.quantity}`
-        });
-      }
-    }
-
-    // Deduct stock from TuckShop
-    for (const item of products) {
-      await TuckShop.findByIdAndUpdate(item.productId, {
-        $inc: { stockQuantity: -item.quantity }
+    // Deduct stock from TuckShop - only after every validation above passed
+    for (const { tuckItem, quantity } of validatedItems) {
+      await TuckShop.findByIdAndUpdate(tuckItem._id, {
+        $inc: { stockQuantity: -quantity }
       });
     }
 
-    // Create POS cart
-    const newCart = new POSShoppingCart({ inmateId, totalAmount, products, location_id: locationObjectId });
+    // Create POS cart using the server-calculated total, never the client's
+    const newCart = new POSShoppingCart({ inmateId, totalAmount: computedTotal, products, location_id: locationObjectId });
     const savedCart = await newCart.save();
 
-    // Deduct balance
-    existingInmate.balance -= totalAmount;
+    // Deduct balance using the server-calculated total
+    existingInmate.balance -= computedTotal;
     await existingInmate.save();
 
     // await WalletTransaction.create({
     //   inmateId: existingInmate._id,
-    //   amount: totalAmount,
+    //   amount: computedTotal,
     //   type: 'DEDUCT',
     //   referenceId: savedCart._id.toString(),
     //   description: `Tuckshop purchase - ${products.length} items`
@@ -385,13 +421,13 @@ const createPOSCart = async (req, res) => {
       targetModel: 'POSShoppingCart',
       targetId: savedCart._id,
       description: `Created POS cart for inmate ${inmateId}`,
-      changes: { totalAmount, products, inmateId, custodyType: existingInmate.custodyType }
+      changes: { totalAmount: computedTotal, products, inmateId, custodyType: existingInmate.custodyType }
     });
 
     res.status(201).json({ success: true, data: savedCart, message: "Cart created successfully" });
 
   } catch (error) {
-    console.log("<><>error post cart",error)
+    logError("createPOSCart error:", error);
     res.status(500).json({ success: false, message: "Internal server error", error: error.message });
   }
 };
@@ -770,23 +806,10 @@ const https = require('https');
 const createPOSCartLatest = async (req, res) => {
   const startTime = Date.now();
 
-  // Basic auth credentials for Razorpay REST API
+  // Basic auth credentials for Razorpay REST API - never log this value
+  // (it is the base64-encoded RAZORPAY_KEY_ID:RAZORPAY_KEY_SECRET pair,
+  // i.e. the literal live API secret, and base64 is trivially reversible).
   const base64Credentials = Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
-
-  // Test authentication
-  try {
-    const testResponse = await axios.get('https://api.razorpay.com/v1/payments', {
-      headers: { Authorization: `Basic ${base64Credentials}` },
-      timeout: 15000,
-      httpsAgent: new https.Agent({ keepAlive: false })
-    });
-    console.log("🔍 TEST AUTH SUCCESS:", testResponse.data);
-  } catch (testError) {
-    console.error("🔍 TEST AUTH FAILED:", {
-      message: testError.message,
-      response: testError.response?.data || 'No response data'
-    });
-  }
 
   try {
     const { inmateId, products } = req.body;
@@ -822,7 +845,7 @@ const createPOSCartLatest = async (req, res) => {
     let mandateDetails = null;
     try {
       mandateDetails = await razorpay.subscriptions.fetch(mandateId);
-      console.log("<><>mandateDetails", JSON.stringify(mandateDetails, null, 2));
+      console.log("mandateDetails:", pick(mandateDetails, ["id", "status", "customer_id", "payment_method"]));
 
       if (mandateDetails.status !== 'active' && mandateDetails.status !== 'authenticated') {
         return res.status(400).json({ success: false, message: "Mandate is not active or authenticated" });
@@ -895,7 +918,7 @@ const createPOSCartLatest = async (req, res) => {
       }
     };
 
-    console.log("📝 CREATING ORDER:", JSON.stringify(orderOptions, null, 2));
+    console.log("Creating Razorpay order:", pick(orderOptions, ["amount", "currency", "receipt"]));
     const order = await razorpay.orders.create(orderOptions);
     console.log("⚡ ORDER CREATED:", order.id);
 
@@ -920,8 +943,7 @@ const createPOSCartLatest = async (req, res) => {
         }
       };
 
-      console.log("📝 CREATING PAYMENT (REST):", JSON.stringify(paymentPayload, null, 2));
-      console.log("<><>base64Credentials",base64Credentials)
+      console.log("Creating Razorpay payment (REST):", pick(paymentPayload, ["amount", "currency", "order_id", "method"]));
       const paymentResponse = await axios.post(
         'https://api.razorpay.com/v1/payments',
         paymentPayload,
@@ -931,10 +953,6 @@ const createPOSCartLatest = async (req, res) => {
           httpsAgent: new https.Agent({ keepAlive: false })
         }
       );
-
-      console.log(".....................................................................");
-      console.log("<><>paymentResponse", paymentResponse.data);
-      console.log(".....................................................................");
 
       paymentResult = paymentResponse.data;
       console.log("💳 PAYMENT CREATED (REST):", paymentResult.id, "Status:", paymentResult.status);
@@ -955,11 +973,7 @@ const createPOSCartLatest = async (req, res) => {
         console.log("🔒 PAYMENT CAPTURED (REST):", paymentResult.id, "Status:", paymentResult.status);
       }
     } catch (paymentError) {
-      console.error("❌ PAYMENT FAILED (REST):", {
-        message: paymentError.message,
-        response: paymentError.response?.data || 'No response data',
-        stack: paymentError.stack
-      });
+      logError("Payment failed (REST):", paymentError);
 
       // Fallback to payment link
       try {
@@ -1003,11 +1017,7 @@ const createPOSCartLatest = async (req, res) => {
           short_url: paymentLink.short_url
         };
       } catch (linkError) {
-        console.error("❌ PAYMENT LINK FAILED (fallback):", {
-          message: linkError.message,
-          response: linkError.response?.data || 'No response data',
-          stack: linkError.stack
-        });
+        logError("Payment link failed (fallback):", linkError);
         throw new Error("Failed to process mandate payment: " + (linkError.message || 'unknown'));
       }
     }
@@ -1110,10 +1120,7 @@ const createPOSCartLatest = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ CRITICAL ERROR in createPOSCart:", {
-      message: error.message || "No error message provided",
-      stack: error.stack || "No stack trace provided",
-      errorDetails: error,
+    logError("Critical error in createPOSCart:", error, {
       timestamp: new Date().toISOString(),
       userId: req.user?.id,
       inmateId: req.body?.inmateId
@@ -1210,7 +1217,12 @@ const getPOSCartById = async (req, res) => {
       return res.status(400).json({ message: "Invalid cart ID format" });
     }
 
-    const cart = await POSShoppingCart.findById(id).populate("products.productId");
+    const locationFilter = req.locationFilter ?? buildLocationFilter(req.user);
+    if (req.locationRestricted && !locationFilter.location_id) {
+      return res.status(404).json({ message: "Cart not found" });
+    }
+
+    const cart = await POSShoppingCart.findOne({ _id: id, ...locationFilter }).populate("products.productId");
 
     if (!cart) {
       return res.status(404).json({ message: "Cart not found" });
@@ -1225,16 +1237,25 @@ const getPOSCartById = async (req, res) => {
 const updatePOSCart = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateBody = req.body;
+    // location_id is never client-settable - it's derived from the
+    // authenticated user's own facility, same as everywhere else this
+    // record is scoped.
+    const { location_id, ...updateBody } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });
     }
 
-    const updatedCart = await POSShoppingCart.findByIdAndUpdate(id, updateBody, {
-      new: true,
-      runValidators: true,
-    });
+    const locationFilter = req.locationFilter ?? buildLocationFilter(req.user);
+    if (req.locationRestricted && !locationFilter.location_id) {
+      return res.status(404).json({ message: "POS cart not found" });
+    }
+
+    const updatedCart = await POSShoppingCart.findOneAndUpdate(
+      { _id: id, ...locationFilter },
+      updateBody,
+      { new: true, runValidators: true }
+    );
 
     if (!updatedCart) {
       return res.status(404).json({ message: "POS cart not found" });
@@ -1264,7 +1285,12 @@ const deletePOSCart = async (req, res) => {
       return res.status(400).json({ message: "Invalid ID format" });
     }
 
-    const deletedCart = await POSShoppingCart.findByIdAndDelete(id);
+    const locationFilter = req.locationFilter ?? buildLocationFilter(req.user);
+    if (req.locationRestricted && !locationFilter.location_id) {
+      return res.status(404).json({ message: "POS cart not found" });
+    }
+
+    const deletedCart = await POSShoppingCart.findOneAndDelete({ _id: id, ...locationFilter });
 
     if (!deletedCart) {
       return res.status(404).json({ message: "POS cart not found" });
@@ -1288,7 +1314,13 @@ const reversePOSCart = async (req, res) => {
   try {
     const { id } = req.params;
     if (req.user.role != "ADMIN") return res.status(404).send({ success: false, message: "Only admins are allowed to use this feature" })
-    const posCartData = await POSShoppingCart.findById(id);
+
+    const locationFilter = req.locationFilter ?? buildLocationFilter(req.user);
+    if (req.locationRestricted && !locationFilter.location_id) {
+      return res.status(404).json({ success: false, message: "POS cart not found" });
+    }
+
+    const posCartData = await POSShoppingCart.findOne({ _id: id, ...locationFilter });
     if (!posCartData) {
       return res.status(404).json({ success: false, message: "POS cart not found" });
     }
@@ -1297,7 +1329,7 @@ const reversePOSCart = async (req, res) => {
       return res.status(400).json({ success: false, message: "This order is already reversed" });
     }
 
-    const inmateData = await Inmate.findOne({ inmateId: posCartData.inmateId });
+    const inmateData = await Inmate.findOne({ inmateId: posCartData.inmateId, location_id: posCartData.location_id });
     if (!inmateData) {
       return res.status(404).json({ success: false, message: "Inmate not found" });
     }
@@ -1339,7 +1371,7 @@ const reversePOSCart = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error("Reverse POS error:", error);
+    logError("Reverse POS error:", error);
     res.status(500).json({
       success: false,
       message: "Internal server error",

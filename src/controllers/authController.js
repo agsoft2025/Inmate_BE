@@ -7,48 +7,56 @@ const tokenBlacklist = require("../utils/blackList");
 const userModel = require("../model/userModel");
 const inmateModel = require("../model/inmateModel");
 const { sendWhatsAppOTP } = require("../service/sms.service");
+const { resolveFaceMatch } = require("../service/faceRecognitionService");
+const { isSuperAdminRole } = require("../utils/adminHierarchy");
+const { logError } = require("../utils/safeLog");
 
 exports.login = async (req, res) => {
     try {
         const { username, password, descriptor } = req.body;
 
         if (descriptor) {
-        const allUsers = await UserSchema.find({}, { descriptor: 1, username: 1, role: 1, fullname: 1, isDeleted: 1 });
-            function euclideanDistance(desc1, desc2) {
-                let sum = 0;
-                for (let i = 0; i < desc1.length; i++) {
-                    let diff = desc1[i] - desc2[i];
-                    sum += diff * diff;
-                }
-                return Math.sqrt(sum);
+            const allUsers = await UserSchema.find({}, { descriptor: 1, username: 1, role: 1, fullname: 1, isDeleted: 1 });
+
+            // Account-takeover fix: resolveFaceMatch() is ambiguity-aware -
+            // it refuses to pick a "best" match when a second enrolled user
+            // is also close enough to plausibly be the same face, instead
+            // of always trusting whichever candidate happens to be a hair
+            // closer. See service/faceRecognitionService.js.
+            const { matched, ambiguous, bestMatch, distance } = resolveFaceMatch(descriptor, allUsers);
+
+            if (ambiguous) {
+                return res.status(400).json({
+                    message: "Face match is ambiguous. Please sign in with your username and password.",
+                    distance,
+                });
             }
-            let bestMatch = null;
-            let minDistance = Infinity;
 
-            for (const user of allUsers) {
-                if (!user.descriptor || user.descriptor.length !== descriptor.length) continue;
-
-                const dist = euclideanDistance(user.descriptor, descriptor);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    bestMatch = user;
-                }
-            }
-            const MATCH_THRESHOLD = 0.4;
-
-            if (!bestMatch || minDistance > MATCH_THRESHOLD) {
+            if (!matched) {
                 // Face Verification Hardening: include the closest distance
                 // we found (when any candidate existed) so the frontend can
                 // show a more useful "why did this fail?" reason than a bare
                 // generic message.
                 return res.status(400).json({
                     message: "Face not recognized",
-                    distance: bestMatch ? minDistance : null,
+                    distance: bestMatch ? distance : null,
                 });
             }
 
             if (bestMatch.isDeleted) {
                 return res.status(403).json({ message: "Account has been deactivated. Please contact the Super Admin." });
+            }
+
+            // Face recognition is a probabilistic, spoofable single factor
+            // (a photo/video can be presented to a camera, and even a
+            // genuine match is only ever "close enough", not exact). It
+            // must never by itself be sufficient to issue the
+            // highest-privilege token in the system - SUPER ADMIN accounts
+            // are required to sign in with a password instead.
+            if (isSuperAdminRole(bestMatch.role)) {
+                return res.status(403).json({
+                    message: "Face login is not available for this account. Please sign in with your username and password.",
+                });
             }
 
             const token = jwt.sign(
@@ -74,7 +82,7 @@ exports.login = async (req, res) => {
                     fullName: bestMatch.fullname,
                     role: bestMatch.role
                 },
-                distance: minDistance
+                distance
             });
         }
 
@@ -122,7 +130,7 @@ exports.login = async (req, res) => {
             }
         });
     } catch (error) {
-        console.log("<><>error", error)
+        logError("login error:", error);
         return res.status(500).json({ message: "Internal server error", error: error.message });
     }
 }
@@ -246,7 +254,6 @@ exports.loginMobile = async (req, res) => {
                 targetId: user._id,
                 description: `User ${user.username} logged in`
             });
-            console.log("<><>otp",otp)
             return res.status(200).send({
                 status: true,
                 otp,
@@ -265,21 +272,20 @@ exports.loginMobile = async (req, res) => {
         }
 
     } catch (error) {
-console.log("error",error)
-return res.status(500).send({status:false,message:"internal server down",error:error.message})
+        logError("loginMobile error:", error);
+        return res.status(500).send({status:false,message:"internal server down",error:error.message})
     }
 }
 
 exports.verifyOTP = async (req, res) => {
     const { username, otp } = req.body;
-    console.log(req.body)
+    console.log("verifyOTP: request received", { username });
     try {
         if (!username) return res.status(400).send({ status: false, message: "Username is required" });
 
         if (!otp) return res.status(400).send({ status: false, message: "OTP is required" });
 
         const user = await UserSchema.findOne({ username });
-        console.log("<><>user",user)
 
         if (!user) return res.status(400).send({ status: false, message: "Invalid username. Please contact admin." });
 
@@ -366,7 +372,7 @@ exports.verifyOTP = async (req, res) => {
         });
 
     } catch (error) {
-        console.log("<><>error",error)
+        logError("verifyOTP error:", error);
         return res.status(500).json({
             status: false,
             message: "Server error",
