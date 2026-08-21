@@ -1,18 +1,34 @@
+const mongoose = require("mongoose");
 const UserSchema = require("../model/userModel");
+const InmateLocation = require("../model/inmateLocationModel");
 const bcrypt = require('bcrypt');
 const logAudit = require("../utils/auditlogger");
 const { faceRecognitionService } = require("../service/faceRecognitionService");
 const { resolveAdminHierarchy } = require("../utils/adminHierarchy");
+const escapeRegex = require("../utils/escapeRegex");
 
 const createAdminCredential = async (req, res) => {
   try {
-    const { username, fullname, password, descriptor } = req.body;
+    const { username, fullname, password, descriptor, location_id } = req.body;
 
     if (!username || !fullname || !password) {
       return res.status(400).json({
         success: false,
         message: "username, fullname, and password are required",
       });
+    }
+    if (!location_id) {
+      return res.status(400).json({
+        success: false,
+        message: "location_id is required to assign this admin to a facility",
+      });
+    }
+    if (!mongoose.Types.ObjectId.isValid(location_id)) {
+      return res.status(400).json({ success: false, message: "Invalid location_id" });
+    }
+    const locationExists = await InmateLocation.findById(location_id);
+    if (!locationExists) {
+      return res.status(404).json({ success: false, message: "Location not found" });
     }
 
     // Face check (optional)
@@ -27,7 +43,7 @@ const createAdminCredential = async (req, res) => {
     }
 
     // Check existing user
-    const existingUser = await UserSchema.findOne({ username });
+    const existingUser = await UserSchema.findOne({ username: { $regex: `^${escapeRegex(username)}$`, $options: "i" } });
     if (existingUser) {
       return res.status(409).json({
         success: false,
@@ -42,7 +58,7 @@ const createAdminCredential = async (req, res) => {
       fullname,
       password: hashedPassword,
       role: "ADMIN",
-      location_id: null,
+      location_id,
       descriptor,
     });
 
@@ -69,7 +85,7 @@ const createAdminCredential = async (req, res) => {
     res.status(201).json({
       success: true,
       data: savedUser,
-      message: "Admin created successfully (no location assigned)",
+      message: "Admin created successfully",
     });
   } catch (error) {
     res.status(500).json({
@@ -263,6 +279,20 @@ const deleteAdmin = async (req, res) => {
 };
 
 
+// Lightweight location list for the Super Admin "assign admin to a facility" picker.
+// requireSuperAdmin (route-level) doesn't require a local DB user row, unlike
+// authenticateToken used on /location, so this is reachable with a Global-issued token.
+const getLocationsForAdmin = async (req, res) => {
+  try {
+    const locations = await InmateLocation
+      .find({}, "name locationName baseUrl")
+      .sort({ name: 1 });
+    res.json({ success: true, data: locations });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
-  createAdminCredential,getAdminById, getAllAdmins, updateAdmin, deleteAdmin
+  createAdminCredential, getAdminById, getAllAdmins, updateAdmin, deleteAdmin, getLocationsForAdmin
 };

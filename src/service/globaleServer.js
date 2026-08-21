@@ -1,4 +1,4 @@
-const { default: axios } = require("axios");
+const globalServiceClient = require("../utils/globalServiceClient");
 const InmateLocation = require("../model/inmateLocationModel");
 
 const syncLocationToGlobal = async (locationId) => {
@@ -15,13 +15,7 @@ const syncLocationToGlobal = async (locationId) => {
       baseUrl: location.baseUrl
     };
 
-    const url = `${process.env.GLOBAL_URL}/api/location`
-    console.log("<><>url",url)
-    const res = await axios.post(
-      `${url}`,
-      payload,
-      { timeout: 5000 }
-    );
+    const res = await globalServiceClient.post("/api/location", payload);
     console.log("<><>res",res.data);
     
 

@@ -38,19 +38,31 @@ const adminRoutes = require("./routes/adminRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
-const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutions.co.in"]
+const defaultOrigins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://152.67.190.22:3000",
+    "http://agsoftsolutions.co.in",
+    "http://152.67.190.22",
+    "https://agsoftsolutions.co.in",
+    "https://global-server-fe.vercel.app",
+    "https://school.agsoftsolutions.co.in",
+];
+const envOrigins = (process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+const allowedOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
 
-// const corsOptionsDelegate = function (req, callback) {
-//     let corsOptions;
-//     if (allowedOrigins.includes(req.header('Origin'))) {
-//         corsOptions = { origin: true };
-//     } else {
-//         corsOptions = { origin: false }; 
-//     }
-//     callback(null, corsOptions);
-// };
-
-app.use(cors(allowedOrigins));
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+}));
 app.use(morgan(":method :url :status :response-time ms"));
 app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
 
