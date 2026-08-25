@@ -9,6 +9,17 @@ const departmentModel = require("../model/departmentModel");
 const InmateFile = require("../model/InmateFile");
 const { requireLocationFilter, LocationAccessError } = require("../utils/locationAccess");
 const { logError, pick } = require("../utils/safeLog");
+const { buildSearchRegex } = require("../utils/searchUtils");
+
+// Only these Financial fields may be set via PUT /financial/:id -
+// `location_id` was already stripped, but every other field (including
+// ones the balance-sync logic below doesn't expect, like `type`) was
+// still taken straight from req.body with no allowlist.
+const FINANCIAL_UPDATABLE_FIELDS = [
+  "inmateId", "fileIds", "custodyType", "transaction", "workAssignId",
+  "hoursWorked", "wageAmount", "depositName", "relationShipId", "remarks",
+  "depositAmount", "depositType", "type", "status",
+];
 
 // Mirrors the helper already used in inmateControllers.js / inmateFileController.js
 // so every handler in this file resolves the caller's facility scope the same way,
@@ -290,9 +301,13 @@ const getFinancialID = async (req, res) => {
 const updateFinancial = async (req, res) => {
   try {
     const { id } = req.params;
-    // location_id is derived from the record's own facility, never
-    // client-settable.
-    const { location_id, ...updateBody } = req.body;
+    // Explicit field allowlist (location_id excluded, never client-settable
+    // - it's derived from the record's own facility) - see
+    // FINANCIAL_UPDATABLE_FIELDS above. Previously this only stripped
+    // location_id and passed the rest of req.body straight through, which
+    // let a client send fields the balance-sync logic below doesn't
+    // expect, or MongoDB update operators as the whole update document.
+    const updateBody = pick(req.body, FINANCIAL_UPDATABLE_FIELDS);
 
     if (!id) {
       return res.status(400).json({ message: "ID is missing" })
@@ -384,7 +399,11 @@ const searchFinancial = async (req, res) => {
       return res.status(400).json({ message: "Search query is required" });
     }
 
-    const regex = new RegExp(query, "i"); // 'i' makes it case-insensitive
+    // buildSearchRegex() escapes regex metacharacters before building the
+    // RegExp - a raw `new RegExp(query, "i")` let a search term become a
+    // catastrophic-backtracking pattern evaluated against every candidate
+    // document.
+    const regex = buildSearchRegex(query);
 
     const locationFilter = getLocationFilterOrAbort(req, res);
     if (!locationFilter) return;

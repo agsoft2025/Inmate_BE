@@ -9,6 +9,11 @@ const { faceRecognitionService, faceRecognitionExcludeUserService } = require(".
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 const { resolveAdminHierarchy, isAdminRole, isSuperAdminRole } = require("../utils/adminHierarchy");
 const { buildSearchRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+
+// Only these User fields may be used to sort the user listing - a
+// client-supplied sortField is otherwise used as a raw dynamic object key.
+const USER_SORTABLE_FIELDS = ["createdAt", "updatedAt", "username", "fullname", "role"];
 
 const canManageUsers = (role) => isAdminRole(role) || isSuperAdminRole(role);
 
@@ -215,7 +220,7 @@ const getAllUsers = async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    const sortField = req.query.sortField || 'createdAt';
+    const sortField = allowlistSortField(req.query.sortField, USER_SORTABLE_FIELDS, 'createdAt');
     const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
 
     try {

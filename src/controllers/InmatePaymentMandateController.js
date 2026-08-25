@@ -6,6 +6,35 @@ const { createMandate } = require("../utils/emandate");
 const axios = require("axios");
 const https = require("https");
 const { logError } = require("../utils/safeLog");
+const { requireLocationFilter, LocationAccessError } = require("../utils/locationAccess");
+
+// Same pattern as paymentController.js's getLocationFilterOrAbort - /mandate
+// doesn't mount attachLocationFilter, so this is resolved inline.
+const getLocationFilterOrAbort = (req, res) => {
+    try {
+        return req.locationFilter ?? requireLocationFilter(req.user);
+    } catch (error) {
+        if (error instanceof LocationAccessError) {
+            res.status(error.status).json({ success: false, message: error.message });
+            return null;
+        }
+        throw error;
+    }
+};
+
+const normalizeRole = (role) => (typeof role === "string" ? role.trim().toUpperCase() : "");
+
+// An INMATE-role caller may only ever create/save a mandate for their own
+// inmate record - staff (ADMIN/SUPER ADMIN) are unrestricted beyond the
+// facility scope already enforced by the locationFilter-based lookup at
+// each call site below.
+const assertOwnRecordIfInmate = (req, res, resolvedInmateId) => {
+    if (normalizeRole(req.user?.role) === "INMATE" && req.user?.inmateId !== resolvedInmateId) {
+        res.status(403).json({ success: false, message: "Access denied: you may only manage your own mandates" });
+        return false;
+    }
+    return true;
+};
 
 const createInmateMandate1 = async (req, res) => {
     try {
@@ -230,9 +259,23 @@ const createInmateMandate = async (req, res) => {
         if (!inmate_id || !name || !email || !phone || !maxAmount) {
             return res.status(400).json({ success: false, message: 'All fields are required' });
         }
+        // inmate_id is used as a raw Mongo filter value below (twice) -
+        // require it to be a string so an operator object (e.g.
+        // {"$ne": null}) can't match an arbitrary inmate/mandate instead
+        // of erroring.
+        if (typeof inmate_id !== "string") {
+            return res.status(400).json({ success: false, message: 'inmate_id must be a valid inmate id' });
+        }
 
-        const inmateData = await inmateModel.findOne({inmateId:inmate_id})
+        const locationFilter = getLocationFilterOrAbort(req, res);
+        if (!locationFilter) return;
+        // Scoped to the caller's own facility, same as every other
+        // inmate lookup in this app - a request can't set up a mandate
+        // against another facility's inmate just by sending that inmate's
+        // business id.
+        const inmateData = await inmateModel.findOne({ inmateId: inmate_id, ...locationFilter })
         if(!inmateData) return res.status(400).json({ success: false, message: 'please select valid inmateId' });
+        if (!assertOwnRecordIfInmate(req, res, inmateData.inmateId)) return;
 
         // Validate maxAmount
         const maxAmountNum = parseInt(maxAmount);
@@ -338,11 +381,44 @@ const saveMandate = async (req, res) => {
     if (!inmate_id || !subscriptionId || !customerId || !maxAmount) {
       return res.status(400).json({ success: false, message: 'All fields are required' });
     }
+    // inmate_id is used as a raw Mongo filter value below, and is stored
+    // as-is on the created mandate document - require it to be a string.
+    // subscriptionId/customerId are also used as raw Mongo/Razorpay-API
+    // inputs below, so the same guard applies to them.
+    if (
+      typeof inmate_id !== "string" ||
+      typeof subscriptionId !== "string" ||
+      typeof customerId !== "string"
+    ) {
+      return res.status(400).json({ success: false, message: 'inmate_id, subscriptionId, and customerId must be valid strings' });
+    }
 
-    // Verify subscription status with Razorpay
+    // Previously this endpoint never checked that inmate_id referred to a
+    // real inmate at all, let alone one the caller is authorized to act
+    // for - it went straight from "is this a non-empty string" to creating
+    // the mandate record. Scoped to the caller's own facility, same as
+    // createInmateMandate above.
+    const locationFilter = getLocationFilterOrAbort(req, res);
+    if (!locationFilter) return;
+    const inmateData = await inmateModel.findOne({ inmateId: inmate_id, ...locationFilter });
+    if (!inmateData) {
+      return res.status(400).json({ success: false, message: 'please select valid inmateId' });
+    }
+    if (!assertOwnRecordIfInmate(req, res, inmateData.inmateId)) return;
+
+    // Verify subscription status with Razorpay - the client-asserted
+    // "this mandate is approved" claim is never trusted directly; the
+    // actual status is always re-fetched from Razorpay's own API.
     const subscription = await razorpay.subscriptions.fetch(subscriptionId);
     if (subscription.status !== 'authenticated') {
       return res.status(400).json({ success: false, message: 'Mandate not active' });
+    }
+    // The subscription must also actually belong to the customerId the
+    // client is asserting it belongs to - otherwise a caller could submit
+    // a real, "authenticated" subscription id that belongs to a totally
+    // different customer/mandate and have it saved as if it were theirs.
+    if (subscription.customer_id !== customerId) {
+      return res.status(400).json({ success: false, message: 'Mandate does not belong to this customer' });
     }
 
     const existingMandate = await InmatePaymentMandate.findOne({inmateId:inmate_id})

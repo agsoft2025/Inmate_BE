@@ -13,6 +13,13 @@ const razorpay = require("../config/razorpay");
 const PaymentLog = require("../model/PaymentLog");
 const { computeRiskForBatch } = require("../utils/riskScoring");
 const { logError, pick } = require("../utils/safeLog");
+
+// Only these POSShoppingCart fields may be set via PUT /pos-shop-cart/:id -
+// location_id was already stripped, but everything else in req.body was
+// passed straight through as the update document, which let a client send
+// MongoDB update operators ($inc/$rename/...) directly instead of a plain
+// field object.
+const POS_CART_UPDATABLE_FIELDS = ["inmateId", "totalAmount", "products", "is_reversed", "reversedAt"];
 // const createPOSCart = async (req, res) => {
 //   const startTime = Date.now();
 //   try {
@@ -299,6 +306,13 @@ const createPOSCart = async (req, res) => {
     // ---- Basic request-shape validation, before any DB/limit calls ----
     if (!inmateId || clientTotalAmount === undefined || !Array.isArray(products) || products.length === 0) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+    // inmateId is used as a raw Mongo filter value below - require a
+    // string so an operator object can't match an unintended inmate
+    // (location-scoping already prevents crossing facilities, but not
+    // which inmate within the caller's own facility gets matched).
+    if (typeof inmateId !== "string") {
+      return res.status(400).json({ success: false, message: "inmateId must be a valid inmate id" });
     }
 
     for (const item of products) {
@@ -1237,10 +1251,13 @@ const getPOSCartById = async (req, res) => {
 const updatePOSCart = async (req, res) => {
   try {
     const { id } = req.params;
-    // location_id is never client-settable - it's derived from the
-    // authenticated user's own facility, same as everywhere else this
-    // record is scoped.
-    const { location_id, ...updateBody } = req.body;
+    // Explicit field allowlist (location_id excluded - never client-
+    // settable, it's derived from the authenticated user's own facility,
+    // same as everywhere else this record is scoped) - see
+    // POS_CART_UPDATABLE_FIELDS above. Previously this only stripped
+    // location_id and passed the rest of req.body straight through as the
+    // whole update document.
+    const updateBody = pick(req.body, POS_CART_UPDATABLE_FIELDS);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ message: "Invalid ID format" });

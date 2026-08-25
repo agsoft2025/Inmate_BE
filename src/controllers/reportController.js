@@ -9,6 +9,15 @@ const { getVendorPurchaseSummary } = require('../service/storeInventoryService')
 const tuckShopModel = require('../model/tuckShopModel');
 const storeInventory = require('../model/storeInventory');
 const { requireLocationFilter } = require("../utils/locationAccess");
+const { escapeRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+
+// Only these TuckShop fields may be used to sort the inventory stock
+// history report - a client-supplied sortField is otherwise used as a raw
+// dynamic object key ({ [sortField]: order }).
+const INVENTORY_REPORT_SORTABLE_FIELDS = [
+  "createdAt", "updatedAt", "itemName", "price", "stockQuantity", "category", "itemNo", "status",
+];
 
 exports.quickStatistics = async (req, res) => {
     try {
@@ -480,6 +489,9 @@ exports.intmateBalanceReport = async (req, res) => {
 
     // ✅ SINGLE
     if (inmateId) {
+      if (typeof inmateId !== "string") {
+        return res.status(400).json({ success: false, message: "inmateId must be a valid inmate id" });
+      }
       const inmate = await Inmate.findOne({ inmateId, ...locationFilter })
         .select('inmateId firstName lastName cellNumber balance dateOfBirth admissionDate crimeType status createdAt')
         .lean();
@@ -811,7 +823,12 @@ exports.wageDistributionReport = async (req, res) => {
         }
 
         // --- Query wage transactions ---
+        // Scoped to the caller's own facility (req.locationFilter,
+        // populated by the route's attachLocationFilter middleware) - this
+        // was previously missing entirely, so any ADMIN got every
+        // facility's wage data.
         const query = {
+            ...(req.locationFilter ?? requireLocationFilter(req.user)),
             createdAt: { $gte: fromDate, $lte: toDate },
             type: 'wages',
         };
@@ -1005,9 +1022,15 @@ exports.inventoryStockHistoryReport = async (req, res) => {
     } = req.body;
 
     // --- Build filter ---
-    const filter = {};
-    if (itemName) filter.itemName = { $regex: itemName, $options: "i" };
-    if (category) filter.category = { $regex: `^${category}$`, $options: "i" };
+    // Scoped to the caller's own facility (req.locationFilter, populated by
+    // the route's attachLocationFilter middleware) - this was previously
+    // missing entirely, so any ADMIN got every facility's stock history.
+    // Regex metacharacters are escaped before being embedded in $regex -
+    // otherwise a value like "(a+)+$" becomes a catastrophic-backtracking
+    // pattern evaluated against every candidate document.
+    const filter = { ...(req.locationFilter ?? requireLocationFilter(req.user)) };
+    if (itemName) filter.itemName = { $regex: escapeRegex(itemName), $options: "i" };
+    if (category) filter.category = { $regex: `^${escapeRegex(category)}$`, $options: "i" };
     if (status) filter.status = status;
 
     // --- Handle date filtering ---
@@ -1046,7 +1069,8 @@ exports.inventoryStockHistoryReport = async (req, res) => {
 
     // --- Sorting ---
     const sort = {};
-    sort[sortField] = sortOrder.toLowerCase() === "asc" ? 1 : -1;
+    const safeSortField = allowlistSortField(sortField, INVENTORY_REPORT_SORTABLE_FIELDS, "createdAt");
+    sort[safeSortField] = sortOrder.toLowerCase() === "asc" ? 1 : -1;
     query.sort(sort);
 
     // --- Pagination ---
@@ -1066,8 +1090,13 @@ exports.inventoryStockHistoryReport = async (req, res) => {
     }
 
     // --- Compute totalQty from storeItemModel ---
+    // Scoped to the same facility as `filter` above, for the same reason -
+    // storeInventory has its own location_id field, so this needs its own
+    // $match stage rather than inheriting the tuckShopModel query's scope.
     const itemNos = items.map(i => i.itemNo);
+    const storeLocationFilter = req.locationFilter ?? requireLocationFilter(req.user);
     const storeTotals = await storeInventory.aggregate([
+      ...(storeLocationFilter && Object.keys(storeLocationFilter).length ? [{ $match: storeLocationFilter }] : []),
       { $match: { itemNo: { $in: itemNos } } },
       { $group: { _id: "$itemNo", totalStock: { $sum: "$stock" } } },
     ]);

@@ -1,19 +1,112 @@
 const express = require('express');
 const app = express();
-const path = require('path');
 require('dotenv').config()
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const helmet = require('helmet');
 const hostname = '0.0.0.0';
 const { version: appVersion } = require('../package.json');
 const { dbConnect } = require('./config/db');
 const { scheduleBackup, rescheduleBackupOnUpdate } = require('./config/cronBackup');
+const { getTrustProxySetting } = require('./config/httpsConfig');
+const { getHelmetOptions } = require('./config/securityHeaders');
+const enforceHttps = require('./middleware/enforceHttps');
+const sanitizeInput = require('./middleware/sanitizeInput');
 
 dbConnect();
 // === Daily Backup at 12:00 AM ===
 scheduleBackup();           // initial schedule
 rescheduleBackupOnUpdate();
 
+// Must be set before anything reads req.ip/req.secure (the HTTPS redirect
+// just below, and the rate limiters further down) - see
+// config/httpsConfig.js for why this is `1` (trust exactly one reverse-
+// proxy hop) rather than `true` (trust any number, which would let a
+// client spoof its own IP past the rate limiter via X-Forwarded-For).
+const trustProxySetting = getTrustProxySetting();
+if (trustProxySetting !== false) {
+    app.set('trust proxy', trustProxySetting);
+}
+
+// Explicit allowlist, never a wildcard (`*` can't be combined with
+// `credentials: true` anyway - browsers reject that combination outright).
+// Overridable via CORS_ALLOWED_ORIGINS (comma-separated) so a production
+// frontend origin can be added/rotated without a code deploy; falls back to
+// these defaults when unset - the deployed production origin, the Vite dev
+// server's default port (5173, the app's actual local frontend port), and
+// localhost:3000 (kept for any tooling/direct-hit use against that port).
+function parseAllowedOrigins() {
+    if (process.env.CORS_ALLOWED_ORIGINS !== undefined) {
+        return process.env.CORS_ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean);
+    }
+    return ["http://localhost:5173", "http://[::1]:5173", "http://localhost:3000", "https://inmateapi.agsoftsolutions.co.in"];
+}
+const allowedOrigins = parseAllowedOrigins();
+if (allowedOrigins.length === 0) {
+    // Fails closed (every cross-origin browser request gets rejected), not
+    // open - still worth a loud warning since it likely means a
+    // misconfigured CORS_ALLOWED_ORIGINS env var.
+    console.warn("CORS: no allowed origins configured - all cross-origin requests will be rejected.");
+}
+
+// Previously `cors(allowedOrigins)` - passing an array as the first
+// positional arg isn't a real allowlist to the `cors` package (it's not an
+// options object), so this had no effect and `credentials` was never set.
+// That happened to be harmless while auth lived in localStorage/headers,
+// but cookie-based auth (this fix) requires the browser to actually send
+// and receive the auth cookie cross-origin, which needs a real allowlist
+// (reflecting one specific origin, never `*`) plus `credentials: true`.
+const corsOptionsDelegate = function (req, callback) {
+    let corsOptions;
+    if (allowedOrigins.includes(req.header('Origin'))) {
+        corsOptions = { origin: true, credentials: true };
+    } else {
+        corsOptions = { origin: false };
+    }
+    callback(null, corsOptions);
+};
+
+// Mounted FIRST, before enforceHttps/helmet/auth/rate-limiting - anything
+// that can short-circuit a request with its own response (a redirect, a
+// 4xx/429 rejection). `cors` middleware answers the browser's OPTIONS
+// preflight itself (204, before calling next()) and also stamps the
+// Access-Control-* headers onto `res` for every other request before
+// passing it along, so those headers are still present even if a later
+// middleware rejects the request.
+//
+// This isn't just tidiness: with cors() mounted after enforceHttps() (the
+// previous order), a plain-HTTP request hitting this app while
+// ENFORCE_HTTPS is active (production, or NODE_ENV=production locally by
+// mistake - see the .env fix alongside this change) got a 301/400 with NO
+// CORS headers, since enforceHttps() responds before cors() ever runs.
+// The browser reports that as "blocked by CORS policy" - masking the real
+// cause (an HTTPS redirect) behind a misleading CORS error. Mounting cors
+// first means any such failure downstream still carries correct CORS
+// headers, so the browser surfaces the actual error instead.
+app.use(cors(corsOptionsDelegate));
+
+// Redirects/rejects plain-HTTP requests in production - see
+// middleware/enforceHttps.js. Runs after cors() (above) so a rejected/
+// redirected insecure request still carries correct CORS headers instead
+// of surfacing to the browser as a misleading CORS error - but still
+// before auth/body parsing, same as before.
+app.use(enforceHttps());
+// Sets the standard security headers (CSP, X-Content-Type-Options,
+// Referrer-Policy, frame protections, HSTS in production, etc.) on every
+// response, including static files under /uploads - see
+// config/securityHeaders.js for the two app-specific overrides.
+app.use(helmet(getHelmetOptions()));
+
 app.use(express.json());
+// Populates req.cookies from the incoming Cookie header - needed for
+// authToken.js to read the httpOnly JWT/CSRF cookies set on login. Must be
+// mounted before any route that runs authenticateToken.
+app.use(cookieParser());
+// Strips any MongoDB operator key ($ne, $where, ...) or dot-notation path
+// out of every request body, on every route, before any handler sees it -
+// see middleware/sanitizeInput.js. Must run after express.json() (needs
+// req.body already parsed) and before every route below.
+app.use(sanitizeInput());
 
 const authRoutes = require("./routes/authRoutes");
 const inmateRoutes = require("./routes/inmateRoutes");
@@ -34,6 +127,7 @@ const backupRoutes = require('./routes/backupRoutes')
 const InmatePaymentMandateRoutes = require("./routes/InmatePaymentMandateRoutes")
 const inmatePaymentRoutes = require("./routes/inmatePaymentRoutes")
 const inmateFileUploadRoutes = require("./routes/inmateFileRoute")
+const uploadsRoutes = require("./routes/uploadsRoute")
 const adminRoutes = require("./routes/adminRoutes")
 const officerFeedbackRoutes = require("./routes/officerFeedbackRoutes")
 const morgan = require("morgan");
@@ -42,21 +136,10 @@ const requireRole = require("./middleware/requireRole");
 const createRateLimiter = require("./middleware/rateLimit");
 const rateLimitConfig = require("./config/rateLimitConfig");
 
-const allowedOrigins = ["http://localhost:5173","https://inmateapi.agsoftsolutions.co.in"]
-
-// const corsOptionsDelegate = function (req, callback) {
-//     let corsOptions;
-//     if (allowedOrigins.includes(req.header('Origin'))) {
-//         corsOptions = { origin: true };
-//     } else {
-//         corsOptions = { origin: false }; 
-//     }
-//     callback(null, corsOptions);
-// };
-
-app.use(cors(allowedOrigins));
+// cors() is mounted much earlier now (right after `trust proxy`, before
+// enforceHttps/helmet) - see the comment there for why. Nothing route-
+// related needed here anymore.
 app.use(morgan(":method :url :status :response-time ms"));
-app.use('/uploads', express.static(path.join(__dirname,'..', 'uploads')));
 
 // Lenient, app-wide safety net (per caller IP) ahead of every route below.
 // The stricter, endpoint-specific limiters further down (login, payment,
@@ -139,6 +222,12 @@ app.use("/officer-feedback", authenticateToken, requireRole("ADMIN", "SUPER ADMI
 app.use("/mandate", authenticateToken, paymentRateLimiter, InmatePaymentMandateRoutes)
 app.use("/payment", authenticateToken, paymentRateLimiter, inmatePaymentRoutes)
 app.use("/file", authenticateToken, uploadRateLimiter, attachLocationFilter, inmateFileUploadRoutes)
+// Replaces the old unauthenticated `express.static('/uploads', ...)` mount
+// (see controllers/uploadsController.js for the full rationale) - every
+// uploaded inmate document/photo now requires a valid session and is only
+// served back if the InmateFile record it maps to is in the caller's own
+// facility (and, for INMATE-role callers, their own record).
+app.use('/uploads', authenticateToken, attachLocationFilter, uploadsRoutes)
 
 
 app.listen(process.env.PORT,hostname, () => {

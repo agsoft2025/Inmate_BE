@@ -1,0 +1,1 @@
+Mongo DB security warning: DB_MONGO_URL has no embedded username/password - MongoDB authentication does not appear to be configured; TLS is not enabled - set DB_MONGO_TLS_ENABLED=true (or add tls=true to DB_MONGO_URL) once the server supports it.

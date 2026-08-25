@@ -3,6 +3,16 @@ const UserSchema = require("../model/userModel");
 const mongoose = require("mongoose");
 const logAudit = require("../utils/auditlogger");
 const { buildLocationFilter } = require("../utils/locationAccess");
+const { buildSearchRegex } = require("../utils/searchUtils");
+const { pick } = require("../utils/safeLog");
+
+// Only these TuckShop fields may be set via PUT /tuck-shop/:id - `updateBody`
+// used to be the entire raw req.body (not even location_id was stripped),
+// which let a client set location_id directly or send MongoDB update
+// operators ($inc/$rename/...) as the whole update document.
+const TUCKSHOP_UPDATABLE_FIELDS = [
+  "itemName", "description", "price", "stockQuantity", "category", "itemNo", "status",
+];
 
 const requireLocationId = (req, res) => {
   const locationId = req.user?.location_id;
@@ -131,7 +141,8 @@ const getTuckShopItemById = async (req, res) => {
 const updateTuckShopItem = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateBody = req.body;
+    // Explicit field allowlist - see TUCKSHOP_UPDATABLE_FIELDS above.
+    const updateBody = pick(req.body, TUCKSHOP_UPDATABLE_FIELDS);
 if((req.body.category === "recharge") && (req.body.price > 500)){
         return res.status(400).send({success:false,message: "Recharge failed: the amount must be ₹500 or less."})
       }
@@ -213,7 +224,11 @@ const searchTuckItems = async (req, res) => {
       return res.status(400).json({ message: "Search query is required" });
     }
 
-    const regex = new RegExp(query, 'i');
+    // buildSearchRegex() escapes regex metacharacters before building the
+    // RegExp - a raw `new RegExp(query, 'i')` let a search term become a
+    // catastrophic-backtracking pattern evaluated against every candidate
+    // document.
+    const regex = buildSearchRegex(query);
 
     const locationFilter = buildLocationFilter(req.user);
     const results = await TuckShopSchema.find({

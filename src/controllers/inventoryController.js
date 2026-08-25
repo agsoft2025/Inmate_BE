@@ -6,6 +6,15 @@ const { getVendorPurchaseSummary } = require("../service/storeInventoryService")
 const { buildLocationFilter } = require("../utils/locationAccess");
 const mongoose = require("mongoose");
 const { logError } = require("../utils/safeLog");
+const { escapeRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+
+// Only these TuckShop fields may be used to sort the canteen-item listing -
+// a client-supplied sortField is otherwise used as a raw dynamic object
+// key ({ [sortField]: order }).
+const CANTEEN_ITEM_SORTABLE_FIELDS = [
+  "createdAt", "updatedAt", "itemName", "price", "stockQuantity", "category", "itemNo", "status",
+];
 
 const requireLocationId = (req, res) => {
   const locationId = req.user?.location_id;
@@ -738,9 +747,12 @@ exports.getAllCanteenItem = async (req, res) => {
     const locationFilter = buildLocationFilter(req.user);
 
     /* 1️⃣ Build filter for TuckShop */
+    // Regex metacharacters are escaped before being embedded in $regex -
+    // otherwise a value like "(a+)+$" becomes a catastrophic-backtracking
+    // pattern evaluated against every candidate document.
     const filter = {};
-    if (itemName) filter.itemName = { $regex: itemName, $options: "i" };
-    if (category) filter.category = { $regex: `^${category}$`, $options: "i" };
+    if (itemName) filter.itemName = { $regex: escapeRegex(itemName), $options: "i" };
+    if (category) filter.category = { $regex: `^${escapeRegex(category)}$`, $options: "i" };
     if (status) filter.status = status;
     const baseFilter = { ...filter, ...locationFilter };
 
@@ -749,7 +761,8 @@ exports.getAllCanteenItem = async (req, res) => {
 
     /* 3️⃣ Sorting */
     const sort = {};
-    sort[sortField] = sortOrder.toLowerCase() === "asc" ? 1 : -1;
+    const safeSortField = allowlistSortField(sortField, CANTEEN_ITEM_SORTABLE_FIELDS, "createdAt");
+    sort[safeSortField] = sortOrder.toLowerCase() === "asc" ? 1 : -1;
     query.sort(sort);
 
     /* 4️⃣ Pagination */
@@ -859,7 +872,7 @@ exports.getCanteenItemListOptions = async (req, res) => {
     const { itemNo } = req.query
     const filter = { status: "Active" };
     if (itemNo) {
-      filter.itemNo = { $regex: itemNo, $options: "i" };
+      filter.itemNo = { $regex: escapeRegex(itemNo), $options: "i" };
     }
     const locationFilter = buildLocationFilter(req.user);
     const baseFilter = { ...filter, ...locationFilter };

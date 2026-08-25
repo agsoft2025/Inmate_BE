@@ -1,6 +1,12 @@
 const Department = require("../model/departmentModel");
 const logAudit = require("../utils/auditlogger");
 const mongoose = require("mongoose");
+const { pick } = require("../utils/safeLog");
+
+// Only these Department fields may be set via PUT /department/:id -
+// `updateBody` used to be the entire raw req.body, passed straight through
+// as the update document.
+const DEPARTMENT_UPDATABLE_FIELDS = ["name", "isActive"];
 
 const createDepartment = async (req, res) => {
     const { name, isActive = true } = req.body;
@@ -82,7 +88,8 @@ const getDepartmentById = async (req, res) => {
 
 const updateDepartment = async (req, res) => {
     const { id } = req.params;
-    const updateBody = req.body;
+    // Explicit field allowlist - see DEPARTMENT_UPDATABLE_FIELDS above.
+    const updateBody = pick(req.body, DEPARTMENT_UPDATABLE_FIELDS);
 
     try {
         if (!id) {

@@ -3,6 +3,12 @@ const bcrypt = require('bcrypt');
 const logAudit = require("../utils/auditlogger");
 const { faceRecognitionService } = require("../service/faceRecognitionService");
 const { resolveAdminHierarchy } = require("../utils/adminHierarchy");
+const { escapeRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+
+// Only these User fields may be used to sort the admin listing - a
+// client-supplied sortBy is otherwise used as a raw dynamic object key.
+const ADMIN_SORTABLE_FIELDS = ["createdAt", "updatedAt", "username", "fullname", "subscription"];
 
 const createAdminCredential = async (req, res) => {
   try {
@@ -101,11 +107,15 @@ const getAllAdmins = async (req, res) => {
       isDeleted: false
     };
 
-    // 🔎 Search (username, fullname)
+    // 🔎 Search (username, fullname) - regex metacharacters are escaped
+    // before being embedded in $regex, otherwise a search term like
+    // "(a+)+$" becomes a catastrophic-backtracking pattern evaluated
+    // against every admin account in the system.
     if (search) {
+      const safeSearch = escapeRegex(search);
       query.$or = [
-        { username: { $regex: search, $options: "i" } },
-        { fullname: { $regex: search, $options: "i" } }
+        { username: { $regex: safeSearch, $options: "i" } },
+        { fullname: { $regex: safeSearch, $options: "i" } }
       ];
     }
 
@@ -120,7 +130,8 @@ const getAllAdmins = async (req, res) => {
 
     // 🔃 Sorting
     const sortOptions = {};
-    sortOptions[sortBy] = order === "asc" ? 1 : -1;
+    const safeSortBy = allowlistSortField(sortBy, ADMIN_SORTABLE_FIELDS, "createdAt");
+    sortOptions[safeSortBy] = order === "asc" ? 1 : -1;
 
     // 📦 Data Fetch
     const users = await UserSchema.find(query)

@@ -1,6 +1,14 @@
 // services/storeInventoryService.js
 const mongoose = require("mongoose");
 const StoreItem = require("../model/storeInventory");
+const { escapeRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+
+// Only these fields may be used to sort the vendor-purchase summary - a
+// client-supplied sortField is otherwise used as a raw dynamic $sort key.
+const VENDOR_PURCHASE_SORTABLE_FIELDS = [
+  "vendorPurchase.date", "vendorPurchase.vendorName", "vendorPurchase.invoiceNo", "totalAmount",
+];
 
 exports.getVendorPurchaseSummary1 = async (query) => {
   const {
@@ -100,6 +108,7 @@ exports.getVendorPurchaseSummary = async (query, locationFilter = {}) => {
 
   const pageNum  = Number(page)  || 1;
   const limitNum = Number(limit) || 10;
+  const safeSortField = allowlistSortField(sortField, VENDOR_PURCHASE_SORTABLE_FIELDS, "vendorPurchase.date");
 
   // Date range filter
   const dateFilter = {};
@@ -112,11 +121,17 @@ exports.getVendorPurchaseSummary = async (query, locationFilter = {}) => {
     pipeline.push({ $match: locationFilter });
   }
 
+  // Regex metacharacters are escaped before being embedded in $regex -
+  // otherwise a search term like "(a+)+$" becomes a catastrophic-
+  // backtracking pattern evaluated against every candidate document, four
+  // times over in this pipeline.
+  const safeSearch = search ? escapeRegex(search) : null;
+
   pipeline.push(
     {
       // Optional match for itemName if search provided
-      $match: search
-        ? { itemName: { $regex: search, $options: "i" } }
+      $match: safeSearch
+        ? { itemName: { $regex: safeSearch, $options: "i" } }
         : {}
     },
 
@@ -133,11 +148,11 @@ exports.getVendorPurchaseSummary = async (query, locationFilter = {}) => {
     {
       // Combined search on invoiceNo OR vendorName OR itemName
       $match: {
-        ...(search && {
+        ...(safeSearch && {
           $or: [
-            { "vendorPurchase.invoiceNo": { $regex: search, $options: "i" } },
-            { "vendorPurchase.vendorName": { $regex: search, $options: "i" } },
-            { itemName: { $regex: search, $options: "i" } }
+            { "vendorPurchase.invoiceNo": { $regex: safeSearch, $options: "i" } },
+            { "vendorPurchase.vendorName": { $regex: safeSearch, $options: "i" } },
+            { itemName: { $regex: safeSearch, $options: "i" } }
           ],
         }),
         ...(Object.keys(dateFilter).length && {
@@ -170,7 +185,7 @@ exports.getVendorPurchaseSummary = async (query, locationFilter = {}) => {
 
     { $project: { _id: 0, vendorPurchase: 1, totalAmount: 1, items: 1 } },
 
-    { $sort: { [sortField]: sortOrder } },
+    { $sort: { [safeSortField]: sortOrder } },
     { $skip: (pageNum - 1) * limitNum },
     { $limit: limitNum },
   );

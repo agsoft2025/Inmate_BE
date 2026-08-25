@@ -152,16 +152,30 @@ exports.updateLocation = async (req, res) => {
 
 exports.getAllLocation = async (req, res) => {
   try {
-    console.log("Fetching all locations", req.user.id);
     const userData = await userModel.findById(req.user.id);
-    console.log("User data:", userData.location_id);
-    const response = await InmateLocation.find({ _id: userData.location_id }).populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
-    if (!response.length) {
-      res.status(404).send({ success: false, data: response, message: "could not find location" })
+    if (!userData) {
+      return res.status(404).send({ success: false, message: "User not found" });
     }
-    res.status(200).send({ success: true, data: response, message: "location fetch successfully" })
+    const response = await InmateLocation.find({ _id: userData.location_id }).populate({ path: 'createdBy', select: 'fullname' }).populate({ path: 'updatedBy', select: 'fullname' })
+    // Previously this fell through to a SECOND res.send() below even after
+    // already sending a 404 here - Express/Node throws "Cannot set headers
+    // after they are sent to the client" the moment that second send runs,
+    // which is always true for a SUPER ADMIN (no location_id, so the query
+    // above always returns []) and for anyone whose location was deleted.
+    // The crash happens after this response was already written (so this
+    // particular request's caller does get a real reply), but Express's
+    // default error handler reacts to the later, now-uncatchable error by
+    // destroying the underlying socket - which, on a kept-alive connection,
+    // can drop whatever OTHER request the browser has queued/sent on that
+    // same connection right around the same time. That's what was actually
+    // producing the "CORS error" on /dashboard and /inmate when they load
+    // alongside this call - not a CORS misconfiguration.
+    if (!response.length) {
+      return res.status(404).send({ success: false, data: response, message: "could not find location" })
+    }
+    return res.status(200).send({ success: true, data: response, message: "location fetch successfully" })
   } catch (error) {
-    res.status(500).send({ success: false, message: "internal server down" })
+    return res.status(500).send({ success: false, message: "internal server down" })
   }
 }
 

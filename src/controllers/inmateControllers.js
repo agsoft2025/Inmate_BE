@@ -12,6 +12,29 @@ const { logError } = require("../utils/safeLog");
 const InmateLocation = require("../model/inmateLocationModel");
 const { resolveLocationId, LocationAccessError, requireLocationFilter } = require("../utils/locationAccess");
 const { normalizeIndianMobile, isValidIndianMobile } = require("../utils/phoneUtils");
+const { buildSearchRegex } = require("../utils/searchUtils");
+const { allowlistSortField } = require("../utils/queryValidation");
+const { pick } = require("../utils/safeLog");
+
+// Only these Inmate fields may be used to sort the list endpoint - a
+// client-supplied sortField is otherwise used as a raw dynamic object key
+// ({ [sortField]: order }), letting the client pick any/unindexed field.
+const INMATE_SORTABLE_FIELDS = [
+  "createdAt", "updatedAt", "inmateId", "firstName", "lastName",
+  "status", "custodyType", "admissionDate", "dateOfBirth", "balance",
+];
+
+// Only these fields may be set via PUT /inmate/:id - `updateBody` used to
+// be the entire raw req.body, so a client could also set `balance`,
+// `location_id`, `user_id`, `isDeleted`, etc. (real schema fields) in the
+// same request, or - since a body with no client-supplied field is passed
+// straight through as the update document - use MongoDB update operators
+// like $inc/$rename/$unset directly instead of a plain field object.
+const INMATE_UPDATABLE_FIELDS = [
+  "inmateId", "firstName", "lastName", "phonenumber", "status",
+  "custodyType", "crimeType", "cellNumber", "dateOfBirth", "admissionDate",
+  "isBlocked", "blockedReason",
+];
 
 const STATUS_MAP = {
   active: "Active",
@@ -238,13 +261,14 @@ const getInmates = async (req, res) => {
   try {
     const { page = 1, limit = 10, sortField = 'createdAt', sortOrder, totalRecords } = req.query;
     const order = sortOrder === 'asc' ? 1 : -1;
+    const safeSortField = allowlistSortField(sortField, INMATE_SORTABLE_FIELDS, 'createdAt');
 
     const locationFilter = getLocationFilterOrAbort(req, res);
     if (!locationFilter) return;
     let inmatesQuery = Inmate.find(locationFilter)
       .populate('location_id', 'locationName')
       .populate('user_id', 'descriptor')
-      .sort({ [sortField]: order });
+      .sort({ [safeSortField]: order });
 
     let currentPage = Number(page);
     let perPage = Number(limit);
@@ -315,7 +339,12 @@ const getInmatesID = async (req, res) => {
 const updateInmate = async (req, res) => {
   try {
     const { id } = req.params;
-    const updateBody = req.body;
+    // Only an explicit allowlist of Inmate fields may be set here -
+    // previously the entire raw req.body was passed to findOneAndUpdate(),
+    // which let a client also set balance/location_id/user_id/isDeleted
+    // (real schema fields), or send MongoDB update operators directly as
+    // the whole update document. See INMATE_UPDATABLE_FIELDS above.
+    const updateBody = pick(req.body, INMATE_UPDATABLE_FIELDS);
     const { inmateId, descriptor } = req.body;
 
     if (!id) {
@@ -453,7 +482,11 @@ const searchInmates = async (req, res) => {
       return res.status(400).json({ message: "Search query is required" });
     }
 
-    const regex = new RegExp(query, "i");
+    // buildSearchRegex() escapes regex metacharacters before building the
+    // RegExp - a raw `new RegExp(query, "i")` let a search term like
+    // "(a+)+$" turn into a catastrophic-backtracking pattern evaluated by
+    // MongoDB against every candidate document.
+    const regex = buildSearchRegex(query);
 
     const baseFilter = getLocationFilterOrAbort(req, res);
     if (!baseFilter) return;

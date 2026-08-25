@@ -1,0 +1,10 @@
+
+> inmate_be@1.0.0 start
+> node src/server.js
+
+[dotenv@17.2.0] injecting env (12) from .env (tip: ⚙️  load multiple .env files with { path: ['.env.local', '.env'] })
+[dotenv@17.2.0] injecting env (0) from .env (tip: ⚙️  override existing env vars with { override: true })
+server running successfully on 3000
+Running in development mode
+Mongo db connected succesfully
+⚠️ Backup is disabled in DB.

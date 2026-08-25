@@ -10,6 +10,8 @@ const { sendWhatsAppOTP } = require("../service/sms.service");
 const { resolveFaceMatch } = require("../service/faceRecognitionService");
 const { isSuperAdminRole } = require("../utils/adminHierarchy");
 const { logError } = require("../utils/safeLog");
+const { AUTH_COOKIE_NAME, getAuthCookieOptions, getCsrfCookieOptions, clearAuthCookies } = require("../config/authCookies");
+const { CSRF_COOKIE_NAME, generateCsrfToken } = require("../middleware/csrf");
 
 exports.login = async (req, res) => {
     try {
@@ -74,8 +76,17 @@ exports.login = async (req, res) => {
                 description: `User ${bestMatch.username} logged in via face recognition`
             });
 
+            // Browser login: the JWT is set as an httpOnly cookie instead of
+            // being returned in the response body, so it's never reachable
+            // by page JS/localStorage (closing the XSS-reads-the-token
+            // attack surface localStorage storage had). A second,
+            // non-httpOnly CSRF cookie is set alongside it - see
+            // middleware/authToken.js for how both are enforced together.
+            res.cookie(AUTH_COOKIE_NAME, token, getAuthCookieOptions());
+            const csrfToken = generateCsrfToken();
+            res.cookie(CSRF_COOKIE_NAME, csrfToken, getCsrfCookieOptions());
+
             return res.json({
-                token,
                 user: {
                     id: bestMatch.id,
                     username: bestMatch.username,
@@ -120,8 +131,13 @@ exports.login = async (req, res) => {
             description: `User ${user.username} logged in`
         });
 
+        // See the face-login branch above for why the token goes in a
+        // cookie instead of the response body now.
+        res.cookie(AUTH_COOKIE_NAME, token, getAuthCookieOptions());
+        const csrfToken = generateCsrfToken();
+        res.cookie(CSRF_COOKIE_NAME, csrfToken, getCsrfCookieOptions());
+
         res.json({
-            token,
             user: {
                 id: user.id,
                 username: user.username,
@@ -139,7 +155,13 @@ exports.login = async (req, res) => {
 exports.logout = async (req, res) => {
     try {
         const user = req.user;
-        const token = req.headers.authorization?.split(" ")[1];
+        // req.token is set by authenticateToken to whichever token actually
+        // authenticated this request - the auth cookie for a browser
+        // client, or the Authorization header for a mobile/external one.
+        // Falls back to the raw header read for defense-in-depth in case
+        // this handler is ever reached without going through that
+        // middleware first.
+        const token = req.token || req.headers.authorization?.split(" ")[1];
 
         if (!user || !token) {
             return res.status(401).json({ message: "Unauthorized: No user or token found" });
@@ -156,6 +178,10 @@ exports.logout = async (req, res) => {
             targetId: user.id,
             description: `User ${user.username} logged out`
         });
+
+        // Clear the httpOnly auth cookie + its CSRF counterpart (no-op for
+        // a mobile/header-authenticated client, which never had them set).
+        clearAuthCookies(res);
 
         // clear cookie counterparts so client resets location selection
         res.clearCookie("selectedLocation", { path: "/" });
@@ -185,7 +211,12 @@ exports.loginMobile = async (req, res) => {
         
         if (!username) return res.status(400).send({ status: false, message: "user name required" })
         if (!password) return res.status(400).send({ status: false, message: "password required" })
-        const user = await userModel.findOne({ username: username })
+        // Unlike login() above, this used the raw body value in the query
+        // with no type guard - a non-string username (e.g. {"$ne": null})
+        // would otherwise reach findOne() as an operator object instead of
+        // erroring. Same fix as login(): require a string and trim it.
+        if (typeof username !== "string") return res.status(400).send({ status: false, message: "invalid username" })
+        const user = await userModel.findOne({ username: username.trim() })
     
         if (!user) return res.status(400).send({ status: false, message: "invalid username" })
 
@@ -285,7 +316,12 @@ exports.verifyOTP = async (req, res) => {
 
         if (!otp) return res.status(400).send({ status: false, message: "OTP is required" });
 
-        const user = await UserSchema.findOne({ username });
+        // Same guard as login()/loginMobile() - reject a non-string
+        // username outright instead of letting it reach findOne() as a
+        // raw (potentially operator-shaped) object.
+        if (typeof username !== "string") return res.status(400).send({ status: false, message: "Invalid username" });
+
+        const user = await UserSchema.findOne({ username: username.trim() });
 
         if (!user) return res.status(400).send({ status: false, message: "Invalid username. Please contact admin." });
 
