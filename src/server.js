@@ -35,6 +35,7 @@ const InmatePaymentMandateRoutes = require("./routes/InmatePaymentMandateRoutes"
 const inmatePaymentRoutes = require("./routes/inmatePaymentRoutes")
 const inmateFileUploadRoutes = require("./routes/inmateFileRoute")
 const adminRoutes = require("./routes/adminRoutes")
+const internalRoutes = require("./routes/internalRoutes")
 const morgan = require("morgan");
 const { attachLocationFilter, attachOptionalLocationFilter } = require("./utils/locationAccess");
 
@@ -92,6 +93,7 @@ app.get('/', (req, res) => {
 
 app.use("/user", authRoutes);
 app.use("/admin", adminRoutes);
+app.use("/internal", internalRoutes);
 app.use("/inmate", authenticateToken, attachLocationFilter, inmateRoutes);
 app.use("/financial", authenticateToken, attachLocationFilter, financialRoutes);
 app.use("/tuck-shop", authenticateToken, attachLocationFilter, tuckShopRoutes);

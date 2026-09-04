@@ -169,6 +169,14 @@ exports.deleteLocation = async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Defense in depth: even though blockLocalAdminLocationWrite already keeps
+    // Local Admins out, never let a non-super-admin delete a location other
+    // than their own assigned one.
+    const isSuperAdmin = String(req.user?.role || "").trim().toUpperCase().includes("SUPER");
+    if (!isSuperAdmin && String(req.user?.location_id || "") !== String(id)) {
+      return res.status(403).json({ success: false, message: "Unauthorized access" });
+    }
+
     const deletedLocation = await InmateLocation.findByIdAndDelete(id);
 
     if (!deletedLocation) {

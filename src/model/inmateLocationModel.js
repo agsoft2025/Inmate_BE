@@ -62,15 +62,16 @@ const inmateLocationSchema = new mongoose.Schema(
             index: true
         },
         globalSyncError: String,
+        // Optional: a location mirrored down from the Global panel has no local
+        // creator yet (the Super Admin attaches an admin afterwards). Locally
+        // created locations still always set these.
         createdBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
-            required: true,
         },
         updatedBy: {
             type: mongoose.Schema.Types.ObjectId,
             ref: 'User',
-            required: true,
         }
     },
     {
